@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         刷客酱 - 网课视频助手 & AI解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.0.1
+// @version      2.0.2
 // @description  超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
@@ -96,6 +96,7 @@
     videoEnabled: true,
     autoPlay: true,
     autoNext: true,
+    skipFinished: true, // 检查任务点是否已完成并自动跳过
     playbackRate: 1.5,
     muted: true,
     autoSolveVideoQuiz: true,
@@ -338,6 +339,7 @@
       this.active = false;
       this.examAssist = null;
       this._lastCompleteHandled = false;
+      this._skipDebounce = false;
     }
 
     setExamAssistant(examAssist) {
@@ -358,6 +360,22 @@
       if (!this.active) return;
       const config = getConfig();
 
+      // 如果开启了“跳过已完成”与“自动下一节”，检查当前任务点是否已完成（适用于已完成的视频或小节）
+      if (config.skipFinished && config.autoNext && !this._skipDebounce) {
+        if (this.isTaskPointFinished()) {
+          this._skipDebounce = true;
+          AppState.log('检测到当前任务点已完成，自动跳过并进入下一节...');
+          setTimeout(() => {
+            this.triggerNextChapter();
+            setTimeout(() => {
+              this._skipDebounce = false;
+            }, 3000);
+          }, 1500);
+          this.timer = setTimeout(() => this.loop(), 2000);
+          return;
+        }
+      }
+
       if (config.videoEnabled) {
         this.processVideos(config);
       }
@@ -368,6 +386,112 @@
       }
 
       this.timer = setTimeout(() => this.loop(), 1500);
+    }
+
+    /**
+     * 检查当前任务点（视频、章节测验或小节）是否已经完成
+     */
+    isTaskPointFinished(video = null) {
+      // 1. 超星/学习通
+      if (Site.isChaoxing) {
+        try {
+          // (A) 如果传入了具体 video 元素，检查其挂载 iframe 与父级容器
+          if (video) {
+            const frameEl = video.ownerDocument?.defaultView?.frameElement;
+            if (frameEl) {
+              const parent = frameEl.parentElement;
+              if (
+                parent?.classList?.contains('ans-job-finished') ||
+                frameEl.closest('.ans-job-finished') ||
+                parent?.querySelector('.ans-job-icon.ans-job-finished')
+              ) {
+                return true;
+              }
+            }
+            if (video.closest('.ans-job-finished')) {
+              return true;
+            }
+          }
+
+          // (B) 遍历顶层窗口与子 iframe 容器检查
+          const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
+          const topIframe = topDoc.querySelector('#iframe');
+          if (topIframe?.contentDocument) {
+            const finishedJobs = Array.from(topIframe.contentDocument.querySelectorAll('.ans-job-finished'));
+            if (finishedJobs.length > 0) {
+              if (video) {
+                const fEl = video.ownerDocument?.defaultView?.frameElement;
+                if (finishedJobs.some((f) => f.contains(fEl))) {
+                  return true;
+                }
+              } else {
+                // 如果当前文档下有完成的任务标记且页面内任务均已完成
+                const totalJobs = topIframe.contentDocument.querySelectorAll('.ans-attach-ct, .ans-job-icon');
+                if (totalJobs.length > 0 && finishedJobs.length >= totalJobs.length) {
+                  return true;
+                }
+              }
+            }
+          }
+
+          // (C) 检查当前激活的标签卡 (#prev_tab .active)
+          const activeTab = topDoc.querySelector('#prev_tab .active, .prev_tab li.active');
+          if (activeTab) {
+            if (
+              activeTab.classList.contains('ans-job-finished') ||
+              activeTab.querySelector('.ans-job-finished, .icon-finish, .jobfinish, .prev_ul_icon_finish')
+            ) {
+              return true;
+            }
+          }
+        } catch (e) {}
+      }
+
+      // 2. 智慧树
+      if (Site.isZhihuishu) {
+        try {
+          const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
+          const activeVideo = topDoc.querySelector('.inner-li li.clearfix.video.activeNode');
+          if (activeVideo) {
+            if (
+              activeVideo.classList.contains('time_icofinish') ||
+              activeVideo.querySelector('.time_icofinish, .finish-icon, .icon-finish')
+            ) {
+              return true;
+            }
+          }
+          const activeRes = topDoc.querySelector('.resources-list .resources-item.active');
+          if (activeRes) {
+            if (activeRes.querySelector('.time_icofinish, .finish-icon, .icon-finish')) {
+              return true;
+            }
+          }
+        } catch (e) {}
+      }
+
+      // 3. 智慧职教 (ICVE)
+      if (Site.isIcve) {
+        try {
+          const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
+          const activeNode = topDoc.querySelector('.panelList .node.active');
+          if (activeNode && (activeNode.classList.contains('is-finish') || activeNode.querySelector('.icon-finish, .finish'))) {
+            return true;
+          }
+        } catch (e) {}
+      }
+
+      // 4. 中国大学 MOOC
+      if (Site.isMooc) {
+        try {
+          const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
+          const activeLesson = topDoc.querySelector('.j-item.active, .lesson-item.active');
+          if (activeLesson && activeLesson.querySelector('.u-icon-finish, .j-icon-finish')) {
+            return true;
+          }
+        } catch (e) {}
+      }
+
+      return false;
     }
 
     /**
@@ -459,6 +583,21 @@
 
     handleSingleVideo(video, config) {
       if (!video) return;
+
+      // 0. 优先检查当前视频任务点是否已完成，若已完成则直接跳过，不播放
+      if (config.skipFinished && this.isTaskPointFinished(video)) {
+        if (!video._skj_skip_handled) {
+          video._skj_skip_handled = true;
+          try {
+            video.pause();
+          } catch (e) {}
+          AppState.log('检测到当前任务点视频已完成，自动跳过并进入下一节...');
+          if (config.autoNext) {
+            setTimeout(() => this.triggerNextChapter(), 1500);
+          }
+        }
+        return;
+      }
 
       // 1. 设置静音以规避现代浏览器的自动播放限制
       if (config.muted && !video.muted) {
@@ -610,6 +749,7 @@
       // 获取跨越 iframe 的顶层 document
       const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
       this._lastCompleteHandled = false;
+      this._skipDebounce = false;
 
       // 1. 超星/学习通
       if (Site.isChaoxing) {
@@ -1654,6 +1794,17 @@
 
               <div class="skj-switch-item">
                 <div>
+                  <div class="skj-switch-text">自动跳过已完成任务点</div>
+                  <div class="skj-form-desc">播放视频前检查是否已有完成绿标，已完成则自动秒跳下一节</div>
+                </div>
+                <label class="skj-switch">
+                  <input type="checkbox" id="skj-cfg-skipFinished" ${cfg.skipFinished ? 'checked' : ''}>
+                  <span class="skj-slider"></span>
+                </label>
+              </div>
+
+              <div class="skj-switch-item">
+                <div>
                   <div class="skj-switch-text">自动静音播放</div>
                   <div class="skj-form-desc">规避浏览器自动播放限制，防止爆音干扰</div>
                 </div>
@@ -1814,6 +1965,7 @@
       const newCfg = {
         videoEnabled: document.getElementById('skj-cfg-videoEnabled').checked,
         autoNext: document.getElementById('skj-cfg-autoNext').checked,
+        skipFinished: document.getElementById('skj-cfg-skipFinished').checked,
         muted: document.getElementById('skj-cfg-muted').checked,
         autoSolveVideoQuiz: document.getElementById('skj-cfg-autoSolveVideoQuiz').checked,
         playbackRate: parseFloat(document.getElementById('skj-cfg-playbackRate').value),
