@@ -86,6 +86,13 @@ class VideoAssistant {
         const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
         const topIframe = topDoc.querySelector('#iframe');
         if (topIframe?.contentDocument) {
+          // 检查子 iframe 中的章节测验是否已完成
+          const innerIframe = topIframe.contentDocument.querySelector('#frame_content');
+          const targetDoc = innerIframe?.contentDocument || topIframe.contentDocument;
+          if (this.isChapterQuizComplete(targetDoc)) {
+            return true;
+          }
+
           const finishedJobs = Array.from(topIframe.contentDocument.querySelectorAll('.ans-job-finished'));
           if (finishedJobs.length > 0) {
             if (video) {
@@ -164,6 +171,64 @@ class VideoAssistant {
   }
 
   /**
+   * 检查超星章节测验是否已作答、已交卷或已完成
+   */
+  isChapterQuizComplete(targetDoc) {
+    if (!targetDoc) return false;
+    try {
+      // 1. 测验头部状态标记
+      const statusEl = targetDoc.querySelector('.testTit_status, .ceyan_status, .status, .test-status');
+      if (statusEl) {
+        const txt = statusEl.innerText.trim();
+        if (
+          statusEl.classList.contains('testTit_status_complete') ||
+          statusEl.classList.contains('complete') ||
+          /已完成|已提交|待批阅|已批阅|已作答|合格|通过/.test(txt)
+        ) {
+          return true;
+        }
+      }
+
+      // 2. 底部操作栏/提交按钮文本判定
+      const subEl = targetDoc.querySelector('.Zy_sub, .subBox, .ZY_sub');
+      if (subEl) {
+        const subTxt = subEl.innerText.trim();
+        if (/已完成|已提交|查看解析|重做|重新作答/.test(subTxt)) {
+          return true;
+        }
+      }
+
+      // 3. 判分/批阅/解析标记 (出现说明已交卷或已批改)
+      if (targetDoc.querySelector('.mark_score, .py_content, .analysis, .marking, .correctAnswer, .marking_content, .myAnswer, .ans-mark')) {
+        return true;
+      }
+
+      // 4. 页面关键文本判定
+      const bodyText = targetDoc.body ? targetDoc.body.innerText : '';
+      if (/待批阅|已批阅|本次得分|您的得分|最终成绩|测试已完成|测验已提交|您已提交/.test(bodyText)) {
+        return true;
+      }
+
+      // 5. 检查父级 iframe 关联的任务点卡片是否已有完成绿标
+      const frameEl = targetDoc.defaultView?.frameElement;
+      if (frameEl) {
+        const jobBox = frameEl.closest('.ans-job-finished, .ans-attach-ct');
+        if (jobBox?.classList.contains('ans-job-finished') || jobBox?.querySelector('.ans-job-icon.ans-job-finished')) {
+          return true;
+        }
+      }
+
+      // 6. 若存在题目列表，但已无保存/提交按钮且存在选项被选中或查看状态
+      const questions = targetDoc.querySelectorAll('#ZyBottom .singleQuesId, .singleQuesId');
+      const hasSubmitBtn = targetDoc.querySelector('.btnSubmit, .btnSave, input[type="submit"], #workpop');
+      if (questions.length > 0 && !hasSubmitBtn) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  /**
    * 自动检测并解答超星章节测验
    */
   checkAndSolveChapterQuiz(config) {
@@ -184,32 +249,33 @@ class VideoAssistant {
       const targetDoc = innerIframe?.contentDocument || doc1;
       if (!targetDoc) return;
 
-      // 检查是否已经答过或者无需作答 (已完成状态)
-      const statusEl = targetDoc.querySelector('.testTit_status, .ceyan_status');
-      const isComplete =
-        statusEl?.classList?.contains('testTit_status_complete') ||
-        targetDoc.body?.innerText?.includes('待批阅') ||
-        targetDoc.querySelector('.Zy_sub')?.innerText?.includes('已完成');
-
-      if (isComplete) {
+      // 检查当前测验是否已经做完/已提交/已完成
+      if (this.isChapterQuizComplete(targetDoc)) {
         if (!this._lastCompleteHandled && config.autoNext) {
           this._lastCompleteHandled = true;
-          AppState.log('检测到当前章节测验已完成，准备跳转下一节...');
-          setTimeout(() => this.triggerNextChapter(), 2500);
+          AppState.log('检测到当前章节测验已做完/已完成，准备跳转下一节...');
+          setTimeout(() => this.triggerNextChapter(), 2000);
         }
         return;
       }
 
       // 检查是否有题目且尚未在作答
       const questions = targetDoc.querySelectorAll('#ZyBottom .singleQuesId');
-      if (questions.length > 0 && !targetDoc._skj_solving) {
-        targetDoc._skj_solving = true;
-        AppState.log(`自动检测到当前任务点为章节测验 (共 ${questions.length} 题)，启动 AI 求解...`);
-        this.examAssist.solveCurrentPage(false).finally(() => {
-          setTimeout(() => {
-            targetDoc._skj_solving = false;
-          }, 5000);
-        });
+      if (questions.length > 0) {
+        // 未配置 AI 接口时：无需请求 AI，题目由用户完成或已作答后自动跳过
+        if (!config.openaiApiKey) {
+          return;
+        }
+
+        if (!targetDoc._skj_solving) {
+          targetDoc._skj_solving = true;
+          AppState.log(`自动检测到当前任务点为章节测验 (共 ${questions.length} 题)，启动 AI 求解...`);
+          this.examAssist.solveCurrentPage(false).finally(() => {
+            setTimeout(() => {
+              targetDoc._skj_solving = false;
+            }, 5000);
+          });
+        }
       }
     } catch (e) {}
   }

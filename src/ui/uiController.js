@@ -219,24 +219,6 @@ class UIController {
               </label>
             </div>
 
-            <div class="skj-form-item" style="margin-top: 12px;">
-              <div class="skj-form-label">API 接口地址 (Base URL)</div>
-              <input type="text" class="skj-input" id="skj-cfg-openaiBaseUrl" placeholder="https://api.openai.com/v1" value="${cfg.openaiBaseUrl}">
-              <div class="skj-form-desc">支持任意 OpenAI 兼容地址，例如 DeepSeek、OneAPI、SiliconFlow 或本地 Ollama</div>
-            </div>
-
-            <div class="skj-form-item">
-              <div class="skj-form-label">API Key (密钥)</div>
-              <input type="password" class="skj-input" id="skj-cfg-openaiApiKey" placeholder="sk-..." value="${cfg.openaiApiKey}">
-              <div class="skj-form-desc">密钥仅保存在您本地油猴存储中，绝不上传至任何第三方服务器</div>
-            </div>
-
-            <div class="skj-form-item">
-              <div class="skj-form-label">模型名称 (Model)</div>
-              <input type="text" class="skj-input" id="skj-cfg-openaiModel" placeholder="gpt-4o-mini" value="${cfg.openaiModel}">
-              <div class="skj-form-desc">例如：gpt-4o-mini、deepseek-chat、qwen-turbo、claude-3-haiku 等</div>
-            </div>
-
             <div class="skj-switch-item">
               <div>
                 <div class="skj-switch-text">做完后自动提交</div>
@@ -253,9 +235,32 @@ class UIController {
               <span>已默认开启【自动提交】，答题完毕后将自动确认提交。如需人工检查核对，可在此处关闭此开关。</span>
             </div>
 
+            <div style="margin-top: 18px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: #334155; display: flex; align-items: center; gap: 6px;">
+              <span>🔑</span>
+              <span>大模型 API 接口参数设置 (需手动保存)</span>
+            </div>
+
+            <div class="skj-form-item">
+              <div class="skj-form-label">API 接口地址 (Base URL)</div>
+              <input type="text" class="skj-input" id="skj-cfg-openaiBaseUrl" placeholder="https://api.openai.com/v1" value="${cfg.openaiBaseUrl}">
+              <div class="skj-form-desc">支持任意 OpenAI 兼容地址，例如 DeepSeek、OneAPI、SiliconFlow 或本地 Ollama</div>
+            </div>
+
+            <div class="skj-form-item">
+              <div class="skj-form-label">API Key (密钥)</div>
+              <input type="password" class="skj-input" id="skj-cfg-openaiApiKey" placeholder="sk-..." value="${cfg.openaiApiKey}">
+              <div class="skj-form-desc">密钥仅保存在您本地油猴脚本存储中，跨网站全局共享，绝不上传至任何第三方服务器</div>
+            </div>
+
+            <div class="skj-form-item">
+              <div class="skj-form-label">模型名称 (Model)</div>
+              <input type="text" class="skj-input" id="skj-cfg-openaiModel" placeholder="gpt-4o-mini" value="${cfg.openaiModel}">
+              <div class="skj-form-desc">例如：gpt-4o-mini、deepseek-chat、qwen-turbo、claude-3-haiku 等</div>
+            </div>
+
             <div style="display: flex; gap: 10px; margin-top: 16px;">
               <button class="skj-btn skj-btn-secondary" id="skj-test-ai-btn">⚡ 测试 API 连接</button>
-              <button class="skj-btn skj-btn-primary" id="skj-save-ai-btn">💾 保存全部设置</button>
+              <button class="skj-btn skj-btn-primary" id="skj-save-api-btn">💾 保存 API 配置</button>
             </div>
           </div>
         </div>
@@ -263,11 +268,10 @@ class UIController {
         <!-- 弹窗全局底部操作栏 -->
         <div class="skj-footer">
           <div class="skj-footer-status" id="skj-save-tip">
-            <span>⚡ 设置变动实时自动保存并生效</span>
+            <span>⚡ 大部分设置修改后实时自动生效并保存</span>
           </div>
           <div style="display: flex; gap: 8px;">
-            <button class="skj-btn skj-btn-secondary" id="skj-modal-close-bottom-btn" style="padding: 6px 14px;">关闭</button>
-            <button class="skj-btn skj-btn-primary" id="skj-save-global-btn" style="padding: 6px 16px;">💾 保存设置</button>
+            <button class="skj-btn skj-btn-secondary" id="skj-modal-close-bottom-btn" style="padding: 6px 18px;">关闭</button>
           </div>
         </div>
       </div>
@@ -301,18 +305,17 @@ class UIController {
       });
     });
 
-    // 保存设置按钮
-    const onSaveClicked = () => {
-      this.saveCurrentInputs(false);
-      alert('配置已成功保存并即时生效！');
-    };
-    document.getElementById('skj-save-ai-btn')?.addEventListener('click', onSaveClicked);
-    document.getElementById('skj-save-global-btn')?.addEventListener('click', onSaveClicked);
+    // 手动保存 API 配置按钮
+    document.getElementById('skj-save-api-btn')?.addEventListener('click', () => {
+      this.saveApiSettings(false);
+    });
+
+    // 弹窗关闭按钮
     document.getElementById('skj-modal-close-bottom-btn')?.addEventListener('click', () => {
       this.toggleModal(false);
     });
 
-    // 监听所有输入控件变动，实现全自动即时保存
+    // 监听大部分开关与选择框变动，实时全自动保存
     const autoSaveSelectAndSwitches = [
       'skj-cfg-videoEnabled',
       'skj-cfg-autoNext',
@@ -328,27 +331,14 @@ class UIController {
       const el = document.getElementById(id);
       if (el) {
         el.addEventListener('change', () => {
-          this.saveCurrentInputs(true);
-        });
-      }
-    });
-
-    // 文本输入框变动防抖自动保存
-    ['skj-cfg-openaiBaseUrl', 'skj-cfg-openaiApiKey', 'skj-cfg-openaiModel'].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.addEventListener('input', () => {
-          if (this._inputSaveTimer) clearTimeout(this._inputSaveTimer);
-          this._inputSaveTimer = setTimeout(() => {
-            this.saveCurrentInputs(true);
-          }, 400);
+          this.saveGeneralSettings();
         });
       }
     });
 
     // 测试 API
     document.getElementById('skj-test-ai-btn')?.addEventListener('click', async () => {
-      this.saveCurrentInputs();
+      this.saveApiSettings(true);
       const cfg = getConfig();
       AppState.log('正在测试 OpenAI API 连接...');
       try {
@@ -378,18 +368,11 @@ class UIController {
     });
   }
 
-  saveCurrentInputs(silent = false) {
+  /**
+   * 保存常规开关与选择设置（实时自动保存）
+   */
+  saveGeneralSettings() {
     const rateEl = document.getElementById('skj-cfg-playbackRate');
-
-    // 读取已存储的配置，防止切换标签页或部分控件为空时意外抹除已配置的 API 信息
-    const curBaseUrl = Storage.get('openaiBaseUrl', DEFAULT_CONFIG.openaiBaseUrl);
-    const curApiKey = Storage.get('openaiApiKey', '');
-    const curModel = Storage.get('openaiModel', DEFAULT_CONFIG.openaiModel);
-
-    const inputBaseUrl = document.getElementById('skj-cfg-openaiBaseUrl')?.value.trim();
-    const inputApiKey = document.getElementById('skj-cfg-openaiApiKey')?.value.trim();
-    const inputModel = document.getElementById('skj-cfg-openaiModel')?.value.trim();
-
     const newCfg = {
       videoEnabled: document.getElementById('skj-cfg-videoEnabled')?.checked ?? true,
       autoNext: document.getElementById('skj-cfg-autoNext')?.checked ?? true,
@@ -399,10 +382,6 @@ class UIController {
       playbackRate: parseFloat(rateEl?.value || '1.0'),
 
       examEnabled: document.getElementById('skj-cfg-examEnabled')?.checked ?? true,
-      // 跨域全局共享保护：有输入则更新，为空且已有存储则保留已有配置
-      openaiBaseUrl: inputBaseUrl || curBaseUrl || DEFAULT_CONFIG.openaiBaseUrl,
-      openaiApiKey: inputApiKey !== undefined && inputApiKey !== '' ? inputApiKey : curApiKey,
-      openaiModel: inputModel || curModel || DEFAULT_CONFIG.openaiModel,
       autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? true
     };
     setConfig(newCfg);
@@ -414,18 +393,36 @@ class UIController {
       this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
     }
 
-    // 底部状态栏动效反馈
+    this.showSaveTip('✅ 设置已实时自动保存并生效');
+  }
+
+  /**
+   * 保存大模型 API 接口配置（用户手动点击保存）
+   */
+  saveApiSettings(silent = false) {
+    const inputBaseUrl = document.getElementById('skj-cfg-openaiBaseUrl')?.value.trim() || 'https://api.openai.com/v1';
+    const inputApiKey = document.getElementById('skj-cfg-openaiApiKey')?.value.trim() || '';
+    const inputModel = document.getElementById('skj-cfg-openaiModel')?.value.trim() || 'gpt-4o-mini';
+
+    Storage.set('openaiBaseUrl', inputBaseUrl);
+    Storage.set('openaiApiKey', inputApiKey);
+    Storage.set('openaiModel', inputModel);
+
+    this.showSaveTip('✅ API 配置已成功保存！');
+    if (!silent) {
+      AppState.log(`API 配置已保存！模型: ${inputModel}`);
+      alert('✅ API 接口配置已成功保存并全局生效！');
+    }
+  }
+
+  showSaveTip(msg) {
     const tip = document.getElementById('skj-save-tip');
     if (tip) {
-      tip.innerHTML = '<span style="color:#10b981;font-weight:600;">✅ 设置已自动保存并即时生效</span>';
+      tip.innerHTML = `<span style="color:#10b981;font-weight:600;">${msg}</span>`;
       if (this._tipTimer) clearTimeout(this._tipTimer);
       this._tipTimer = setTimeout(() => {
-        tip.innerHTML = '<span>⚡ 设置变动实时自动保存并生效</span>';
-      }, 2000);
-    }
-
-    if (!silent) {
-      AppState.log(`设置已保存！视频倍速: ${newCfg.playbackRate}x`);
+        tip.innerHTML = '<span>⚡ 大部分设置修改后实时自动生效并保存</span>';
+      }, 2500);
     }
   }
 

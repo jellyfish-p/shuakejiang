@@ -78,11 +78,11 @@ class ExamAssistant {
     if (!targetDoc) return false;
 
     // 检查当前测验是否已经提交或批阅完成 (无需作答)
-    const statusEl = targetDoc.querySelector('.testTit_status, .ceyan_status');
-    const isComplete =
-      statusEl?.classList?.contains('testTit_status_complete') ||
+    const isComplete = this.videoAssist?.isChapterQuizComplete(targetDoc) ?? (
+      targetDoc.querySelector('.testTit_status, .ceyan_status')?.classList?.contains('testTit_status_complete') ||
       targetDoc.body?.innerText?.includes('待批阅') ||
-      targetDoc.querySelector('.Zy_sub')?.innerText?.includes('已完成');
+      targetDoc.querySelector('.Zy_sub')?.innerText?.includes('已完成')
+    );
 
     if (isComplete) {
       AppState.log('检测到当前章节测验已完成，跳过作答');
