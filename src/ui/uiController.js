@@ -196,9 +196,9 @@ class UIController {
             <div class="skj-form-item" style="margin-top: 16px;">
               <div class="skj-form-label">视频播放倍速</div>
               <select class="skj-input" id="skj-cfg-playbackRate">
-                <option value="1.0" ${cfg.playbackRate == 1.0 ? 'selected' : ''}>1.0x (正常速度)</option>
-                <option value="1.25" ${cfg.playbackRate == 1.25 ? 'selected' : ''}>1.25x (推荐)</option>
-                <option value="1.5" ${cfg.playbackRate == 1.5 ? 'selected' : ''}>1.5x (稳定快速)</option>
+                <option value="1.0" ${cfg.playbackRate == 1.0 ? 'selected' : ''}>1.0x (原速 / 推荐)</option>
+                <option value="1.25" ${cfg.playbackRate == 1.25 ? 'selected' : ''}>1.25x (平稳快速)</option>
+                <option value="1.5" ${cfg.playbackRate == 1.5 ? 'selected' : ''}>1.5x (快速)</option>
                 <option value="2.0" ${cfg.playbackRate == 2.0 ? 'selected' : ''}>2.0x (极速)</option>
                 <option value="2.5" ${cfg.playbackRate == 2.5 ? 'selected' : ''}>2.5x (超速)</option>
               </select>
@@ -259,6 +259,17 @@ class UIController {
             </div>
           </div>
         </div>
+
+        <!-- 弹窗全局底部操作栏 -->
+        <div class="skj-footer">
+          <div class="skj-footer-status" id="skj-save-tip">
+            <span>⚡ 设置变动实时自动保存并生效</span>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="skj-btn skj-btn-secondary" id="skj-modal-close-bottom-btn" style="padding: 6px 14px;">关闭</button>
+            <button class="skj-btn skj-btn-primary" id="skj-save-global-btn" style="padding: 6px 16px;">💾 保存设置</button>
+          </div>
+        </div>
       </div>
     `;
 
@@ -290,11 +301,49 @@ class UIController {
       });
     });
 
-    // 保存设置
-    document.getElementById('skj-save-ai-btn')?.addEventListener('click', () => {
-      this.saveCurrentInputs();
-      AppState.log('设置保存成功！');
-      alert('配置已成功保存！');
+    // 保存设置按钮
+    const onSaveClicked = () => {
+      this.saveCurrentInputs(false);
+      alert('配置已成功保存并即时生效！');
+    };
+    document.getElementById('skj-save-ai-btn')?.addEventListener('click', onSaveClicked);
+    document.getElementById('skj-save-global-btn')?.addEventListener('click', onSaveClicked);
+    document.getElementById('skj-modal-close-bottom-btn')?.addEventListener('click', () => {
+      this.toggleModal(false);
+    });
+
+    // 监听所有输入控件变动，实现全自动即时保存
+    const autoSaveSelectAndSwitches = [
+      'skj-cfg-videoEnabled',
+      'skj-cfg-autoNext',
+      'skj-cfg-skipFinished',
+      'skj-cfg-muted',
+      'skj-cfg-autoSolveVideoQuiz',
+      'skj-cfg-playbackRate',
+      'skj-cfg-examEnabled',
+      'skj-cfg-autoSubmit'
+    ];
+
+    autoSaveSelectAndSwitches.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener('change', () => {
+          this.saveCurrentInputs(true);
+        });
+      }
+    });
+
+    // 文本输入框变动防抖自动保存
+    ['skj-cfg-openaiBaseUrl', 'skj-cfg-openaiApiKey', 'skj-cfg-openaiModel'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener('input', () => {
+          if (this._inputSaveTimer) clearTimeout(this._inputSaveTimer);
+          this._inputSaveTimer = setTimeout(() => {
+            this.saveCurrentInputs(true);
+          }, 400);
+        });
+      }
     });
 
     // 测试 API
@@ -322,16 +371,6 @@ class UIController {
       this.videoAssist.triggerNextChapter();
     });
 
-    // 监听视频倍速实时变动
-    document.getElementById('skj-cfg-playbackRate')?.addEventListener('change', (e) => {
-      const newRate = parseFloat(e.target.value) || 1.0;
-      Storage.set('playbackRate', newRate);
-      const videos = this.videoAssist.findMediaElements();
-      for (const v of videos) {
-        this.videoAssist.applyPlaybackRate(v, newRate);
-      }
-    });
-
     // 清空日志
     document.getElementById('skj-quick-clear-btn')?.addEventListener('click', () => {
       AppState.logs = [];
@@ -339,27 +378,43 @@ class UIController {
     });
   }
 
-  saveCurrentInputs() {
+  saveCurrentInputs(silent = false) {
+    const rateEl = document.getElementById('skj-cfg-playbackRate');
     const newCfg = {
-      videoEnabled: document.getElementById('skj-cfg-videoEnabled').checked,
-      autoNext: document.getElementById('skj-cfg-autoNext').checked,
-      skipFinished: document.getElementById('skj-cfg-skipFinished').checked,
-      muted: document.getElementById('skj-cfg-muted').checked,
-      autoSolveVideoQuiz: document.getElementById('skj-cfg-autoSolveVideoQuiz').checked,
-      playbackRate: parseFloat(document.getElementById('skj-cfg-playbackRate').value),
+      videoEnabled: document.getElementById('skj-cfg-videoEnabled')?.checked ?? true,
+      autoNext: document.getElementById('skj-cfg-autoNext')?.checked ?? true,
+      skipFinished: document.getElementById('skj-cfg-skipFinished')?.checked ?? true,
+      muted: document.getElementById('skj-cfg-muted')?.checked ?? true,
+      autoSolveVideoQuiz: document.getElementById('skj-cfg-autoSolveVideoQuiz')?.checked ?? true,
+      playbackRate: parseFloat(rateEl?.value || '1.0'),
 
-      examEnabled: document.getElementById('skj-cfg-examEnabled').checked,
-      openaiBaseUrl: document.getElementById('skj-cfg-openaiBaseUrl').value.trim(),
-      openaiApiKey: document.getElementById('skj-cfg-openaiApiKey').value.trim(),
-      openaiModel: document.getElementById('skj-cfg-openaiModel').value.trim(),
-      autoSubmit: document.getElementById('skj-cfg-autoSubmit').checked
+      examEnabled: document.getElementById('skj-cfg-examEnabled')?.checked ?? true,
+      openaiBaseUrl: document.getElementById('skj-cfg-openaiBaseUrl')?.value.trim() || 'https://api.openai.com/v1',
+      openaiApiKey: document.getElementById('skj-cfg-openaiApiKey')?.value.trim() || '',
+      openaiModel: document.getElementById('skj-cfg-openaiModel')?.value.trim() || 'gpt-4o-mini',
+      autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? false
     };
     setConfig(newCfg);
 
-    // 立即向当前页面所有视频同步新设定的倍速
+    // 立即向当前页面所有视频同步新设定的倍速和静音状态
     const videos = this.videoAssist.findMediaElements();
     for (const v of videos) {
+      if (newCfg.muted && !v.muted) v.muted = true;
       this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
+    }
+
+    // 底部状态栏动效反馈
+    const tip = document.getElementById('skj-save-tip');
+    if (tip) {
+      tip.innerHTML = '<span style="color:#10b981;font-weight:600;">✅ 设置已自动保存并即时生效</span>';
+      if (this._tipTimer) clearTimeout(this._tipTimer);
+      this._tipTimer = setTimeout(() => {
+        tip.innerHTML = '<span>⚡ 设置变动实时自动保存并生效</span>';
+      }, 2000);
+    }
+
+    if (!silent) {
+      AppState.log(`设置已保存！视频倍速: ${newCfg.playbackRate}x`);
     }
   }
 

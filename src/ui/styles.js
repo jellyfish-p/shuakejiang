@@ -176,6 +176,24 @@ const UI_STYLES = `
           display: block;
         }
 
+        /* 弹窗底部操作栏 */
+        .skj-footer {
+          padding: 12px 20px;
+          background: #f8fafc;
+          border-top: 1px solid #e2e8f0;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+        }
+        .skj-footer-status {
+          font-size: 12px;
+          color: #10b981;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+
         /* 表单控件 */
         .skj-form-item {
           margin-bottom: 16px;

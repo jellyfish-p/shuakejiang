@@ -32,7 +32,7 @@ const DEFAULT_CONFIG = {
   autoPlay: true,
   autoNext: true,
   skipFinished: true, // 检查任务点是否已完成并自动跳过
-  playbackRate: 1.5,
+  playbackRate: 1.0, // 默认 1.0x 原速
   muted: true,
   autoSolveVideoQuiz: true,
 
