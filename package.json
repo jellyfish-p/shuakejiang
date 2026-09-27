@@ -1,6 +1,6 @@
 {
   "name": "shuakejiang",
-  "version": "2.0.6",
+  "version": "2.0.7",
   "description": "超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！",
   "main": "shuakejiang.user.js",
   "scripts": {

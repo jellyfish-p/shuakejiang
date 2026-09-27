@@ -86,10 +86,24 @@ class VideoAssistant {
         const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
         const topIframe = topDoc.querySelector('#iframe');
         if (topIframe?.contentDocument) {
-          // 检查子 iframe 中的章节测验是否已完成
-          const innerIframe = topIframe.contentDocument.querySelector('#frame_content');
+          // 1. 深度查找子 iframe 中的测验文档是否已完成
+          const innerIframe = topIframe.contentDocument.querySelector(
+            '#frame_content, iframe[src*="work"], iframe[src*="selectWorkQuestion"]'
+          );
           const targetDoc = innerIframe?.contentDocument || topIframe.contentDocument;
           if (this.isChapterQuizComplete(targetDoc)) {
+            return true;
+          }
+
+          // 2. 检查 #iframe 中的任务点卡片图标（真实 DOM 中标有“任务点已完成”）
+          const jobIcons = Array.from(
+            topIframe.contentDocument.querySelectorAll('.ans-job-icon, [class*="ans-job-icon"]')
+          );
+          const isIconFinished = jobIcons.some((icon) => {
+            const txt = (icon.innerText || icon.title || icon.getAttribute('aria-label') || '').trim();
+            return txt.includes('任务点已完成') || icon.classList.contains('ans-job-finished');
+          });
+          if (isIconFinished) {
             return true;
           }
 
@@ -176,6 +190,16 @@ class VideoAssistant {
   isChapterQuizComplete(targetDoc) {
     if (!targetDoc) return false;
     try {
+      // 0. 真实 DOM 核心特征：页面标题或根文档标识为“查看已批阅作业”
+      if (
+        targetDoc.title?.includes('查看已批阅作业') ||
+        targetDoc.title?.includes('查看作业') ||
+        targetDoc.body?.innerText?.includes('查看已批阅作业') ||
+        targetDoc.querySelector('h1, h2, .head_tit')?.innerText?.includes('查看已批阅作业')
+      ) {
+        return true;
+      }
+
       // 1. 测验头部状态标记
       const statusEl = targetDoc.querySelector('.testTit_status, .ceyan_status, .status, .test-status');
       if (statusEl) {
@@ -199,21 +223,29 @@ class VideoAssistant {
       }
 
       // 3. 判分/批阅/解析标记 (出现说明已交卷或已批改)
-      if (targetDoc.querySelector('.mark_score, .py_content, .analysis, .marking, .correctAnswer, .marking_content, .myAnswer, .ans-mark')) {
+      if (
+        targetDoc.querySelector(
+          '.mark_score, .py_content, .analysis, .marking, .correctAnswer, .marking_content, .myAnswer, .ans-mark, .ceyanAiAssistant'
+        )
+      ) {
         return true;
       }
 
       // 4. 页面关键文本判定
       const bodyText = targetDoc.body ? targetDoc.body.innerText : '';
-      if (/待批阅|已批阅|本次得分|您的得分|最终成绩|测试已完成|测验已提交|您已提交/.test(bodyText)) {
+      if (/待批阅|已批阅|本次成绩|本次得分|您的得分|最终成绩|测试已完成|测验已提交|您已提交/.test(bodyText)) {
         return true;
       }
 
-      // 5. 检查父级 iframe 关联的任务点卡片是否已有完成绿标
+      // 5. 检查父级 iframe 关联的任务点卡片是否已有完成绿标或已完成文字
       const frameEl = targetDoc.defaultView?.frameElement;
       if (frameEl) {
-        const jobBox = frameEl.closest('.ans-job-finished, .ans-attach-ct');
-        if (jobBox?.classList.contains('ans-job-finished') || jobBox?.querySelector('.ans-job-icon.ans-job-finished')) {
+        const jobBox = frameEl.closest('.ans-job-finished, .ans-attach-ct, .editor-iframe');
+        if (
+          jobBox?.classList.contains('ans-job-finished') ||
+          jobBox?.querySelector('.ans-job-icon.ans-job-finished') ||
+          jobBox?.querySelector('.ans-job-icon')?.innerText?.includes('任务点已完成')
+        ) {
           return true;
         }
       }
@@ -594,17 +626,17 @@ class VideoAssistant {
         return;
       }
 
-      // 尝试目录中的下一个节点
+      // 尝试目录中的下一个节点 (支持新版 .posCatalog_name 节点与传统 a 链接)
       const currentCatalog = topDoc.querySelector('.posCatalog_select, .leveltwo.active, .posCatalog_active');
       if (currentCatalog) {
         let nextNode = currentCatalog.nextElementSibling;
-        while (nextNode && !nextNode.querySelector('a') && nextNode.tagName !== 'A') {
+        while (nextNode && !nextNode.querySelector('.posCatalog_name, a') && nextNode.tagName !== 'A' && !nextNode.classList.contains('posCatalog_name')) {
           nextNode = nextNode.nextElementSibling;
         }
-        const link = nextNode?.querySelector('a') || (nextNode?.tagName === 'A' ? nextNode : null);
-        if (link) {
+        const target = nextNode?.querySelector('.posCatalog_name, a, span') || (nextNode?.tagName === 'A' ? nextNode : null);
+        if (target) {
           AppState.log('跳转至目录中的下一节课程');
-          link.click();
+          target.click();
           this.handleJobFinishTips(topDoc);
           return;
         }
