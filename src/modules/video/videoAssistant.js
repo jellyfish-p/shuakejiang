@@ -223,7 +223,11 @@ class VideoAssistant {
     const iframes = Array.from(root.querySelectorAll('iframe'));
     for (const ifr of iframes) {
       try {
-        const doc = ifr.contentDocument || ifr.contentWindow?.document;
+        const win = ifr.contentWindow;
+        if (win) {
+          hookMediaWindow(win);
+        }
+        const doc = ifr.contentDocument || win?.document;
         if (doc) {
           videos = videos.concat(this.findMediaElements(doc));
         }
@@ -273,11 +277,9 @@ class VideoAssistant {
       video.muted = true;
     }
 
-    // 2. 强制设置播放倍速
+    // 2. 强制设置播放倍速 (多层突破防倍速限制)
     const targetRate = Number(config.playbackRate) || 1.0;
-    if (Math.abs(video.playbackRate - targetRate) > 0.05) {
-      video.playbackRate = targetRate;
-    }
+    this.applyPlaybackRate(video, targetRate);
 
     // 3. 自动播放与防暂停
     if (config.autoPlay && video.paused && !video.ended) {
@@ -309,6 +311,80 @@ class VideoAssistant {
       if (config.autoNext) {
         setTimeout(() => this.triggerNextChapter(), 2000);
       }
+    }
+  }
+
+  /**
+   * 安全并强制设置视频播放倍速 (突破超星/学习通防倍速限制)
+   */
+  applyPlaybackRate(video, targetRate) {
+    if (!video) return;
+    targetRate = Number(targetRate) || 1.0;
+
+    // 确保该 video 所在的 window 原型链已被 Hook
+    const ifrWin = video.ownerDocument?.defaultView || window;
+    hookMediaWindow(ifrWin);
+
+    // 捕获阶段拦截 ratechange 事件，阻断事件向后传播
+    if (!video._skj_ratechange_captured) {
+      video._skj_ratechange_captured = true;
+      video.addEventListener(
+        'ratechange',
+        (e) => {
+          e.stopImmediatePropagation();
+        },
+        true
+      );
+    }
+
+    // 仅在真实倍速未同步时执行原生赋值
+    if (Math.abs((video._skj_real_rate || 1.0) - targetRate) > 0.05) {
+      const nativeDesc =
+        ifrWin._skj_native_rate_desc ||
+        Object.getOwnPropertyDescriptor(ifrWin.HTMLMediaElement.prototype, 'playbackRate');
+
+      if (nativeDesc && nativeDesc.set) {
+        video._skj_setting_real_rate = true;
+        try {
+          nativeDesc.set.call(video, targetRate);
+          video._skj_real_rate = targetRate;
+          AppState.log(`已将视频播放倍速设置为: ${targetRate}x`);
+        } catch (e) {
+          video.playbackRate = targetRate;
+          video._skj_real_rate = targetRate;
+        } finally {
+          video._skj_setting_real_rate = false;
+        }
+      } else {
+        video._skj_setting_real_rate = true;
+        try {
+          video.playbackRate = targetRate;
+          video._skj_real_rate = targetRate;
+          AppState.log(`已将视频播放倍速设置为: ${targetRate}x`);
+        } finally {
+          video._skj_setting_real_rate = false;
+        }
+      }
+    }
+
+    // 适配超星内部 Video.js 播放器实例
+    if (ifrWin.videojs) {
+      try {
+        const players = ifrWin.videojs.players || {};
+        const p = players[video.id] || (typeof ifrWin.videojs === 'function' ? ifrWin.videojs(video) : null);
+        if (p) {
+          // 解锁超星 studyControl 限制 (允许快进与切换窗口)
+          if (p.studyControl) {
+            p.studyControl.enableSwitchWindow = 1;
+            p.studyControl.enableFastForward = 1;
+          }
+          if (typeof p.playbackRate === 'function' && Math.abs((p.playbackRate() || 1.0) - targetRate) > 0.05) {
+            try {
+              p.playbackRate(targetRate);
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
     }
   }
 

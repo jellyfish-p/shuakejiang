@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         刷客酱 - 网课视频助手 & AI解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.0.2
+// @version      2.0.3
 // @description  超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
@@ -30,38 +30,73 @@
   /* =========================================================================
    * 0. 全局环境与反检测倍速 HOOK (必须在 document-start 最先执行)
    * ========================================================================= */
-  try {
-    const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    const origAddEventListener = win.HTMLMediaElement.prototype.addEventListener;
-    win.HTMLMediaElement.prototype.addEventListener = function (type, listener, options) {
-      // 屏蔽播放器自身绑定的倍速变动与进度拖动检测事件，防止被强制重置倍速或暂停
-      if (type === 'ratechange' || type === 'seeked' || type === 'seeking') {
-        return;
-      }
-      return origAddEventListener.call(this, type, listener, options);
-    };
 
-    Object.defineProperty(win.HTMLMediaElement.prototype, 'onratechange', {
-      configurable: true,
-      enumerable: true,
-      get: () => null,
-      set: () => {}
-    });
-    Object.defineProperty(win.HTMLMediaElement.prototype, 'onseeked', {
-      configurable: true,
-      enumerable: true,
-      get: () => null,
-      set: () => {}
-    });
-    Object.defineProperty(win.HTMLMediaElement.prototype, 'onseeking', {
-      configurable: true,
-      enumerable: true,
-      get: () => null,
-      set: () => {}
-    });
-  } catch (e) {
-    console.warn('[刷客酱] HOOK HTMLMediaElement 失败:', e);
+  /**
+   * 为指定 window 注入媒体元素反检测 Hook
+   * 确保能够跨 iframe 穿透并彻底解除超星等网课平台的倍速检测与强制暂停限制
+   */
+  function hookMediaWindow(win) {
+    if (!win) return;
+    try {
+      if (win._skj_media_hooked) return;
+      win._skj_media_hooked = true;
+
+      const proto = win.HTMLMediaElement?.prototype;
+      if (!proto) return;
+
+      // 1. 屏蔽网页播放器监听倍速变动与进度拖动检测
+      const origAdd = proto.addEventListener;
+      proto.addEventListener = function (type, listener, options) {
+        // 拦截 ratechange、seeked、seeking，防止超星等脚本捕获倍速变动后强行重置或暂停
+        if (type === 'ratechange' || type === 'seeked' || type === 'seeking') {
+          return;
+        }
+        return origAdd.call(this, type, listener, options);
+      };
+
+      // 2. 劫持 playbackRate 属性描述符 (实现倍速伪装与防篡改)
+      const origDesc = Object.getOwnPropertyDescriptor(proto, 'playbackRate');
+      if (origDesc) {
+        win._skj_native_rate_desc = origDesc;
+        Object.defineProperty(proto, 'playbackRate', {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            // 外部或超星检测代码读取时，伪装返回 1.0 (防止超星检测到倍速异常强制暂停或重置)
+            if (this._skj_setting_real_rate) {
+              return origDesc.get.call(this);
+            }
+            return 1.0;
+          },
+          set: function (val) {
+            // 仅允许刷客酱内部设置真实底层播放倍速
+            if (this._skj_setting_real_rate) {
+              origDesc.set.call(this, val);
+              this._skj_real_rate = val;
+            } else {
+              // 拦截并丢弃外部脚本尝试强制重置倍速为 1 的操作
+            }
+          }
+        });
+      }
+
+      // 3. 屏蔽 onratechange, onseeked, onseeking 属性赋值
+      ['onratechange', 'onseeked', 'onseeking'].forEach((prop) => {
+        Object.defineProperty(proto, prop, {
+          configurable: true,
+          enumerable: true,
+          get: () => null,
+          set: () => {}
+        });
+      });
+    } catch (e) {
+      console.warn('[刷客酱] HOOK HTMLMediaElement 失败:', e);
+    }
   }
+
+  // 立即在当前窗口执行 (document-start)
+  const rootWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  hookMediaWindow(rootWin);
 
   /* =========================================================================
    * 1. 存储与配置中心
@@ -553,7 +588,11 @@
       const iframes = Array.from(root.querySelectorAll('iframe'));
       for (const ifr of iframes) {
         try {
-          const doc = ifr.contentDocument || ifr.contentWindow?.document;
+          const win = ifr.contentWindow;
+          if (win) {
+            hookMediaWindow(win);
+          }
+          const doc = ifr.contentDocument || win?.document;
           if (doc) {
             videos = videos.concat(this.findMediaElements(doc));
           }
@@ -603,11 +642,9 @@
         video.muted = true;
       }
 
-      // 2. 强制设置播放倍速
+      // 2. 强制设置播放倍速 (多层突破防倍速限制)
       const targetRate = Number(config.playbackRate) || 1.0;
-      if (Math.abs(video.playbackRate - targetRate) > 0.05) {
-        video.playbackRate = targetRate;
-      }
+      this.applyPlaybackRate(video, targetRate);
 
       // 3. 自动播放与防暂停
       if (config.autoPlay && video.paused && !video.ended) {
@@ -639,6 +676,80 @@
         if (config.autoNext) {
           setTimeout(() => this.triggerNextChapter(), 2000);
         }
+      }
+    }
+
+    /**
+     * 安全并强制设置视频播放倍速 (突破超星/学习通防倍速限制)
+     */
+    applyPlaybackRate(video, targetRate) {
+      if (!video) return;
+      targetRate = Number(targetRate) || 1.0;
+
+      // 确保该 video 所在的 window 原型链已被 Hook
+      const ifrWin = video.ownerDocument?.defaultView || window;
+      hookMediaWindow(ifrWin);
+
+      // 捕获阶段拦截 ratechange 事件，阻断事件向后传播
+      if (!video._skj_ratechange_captured) {
+        video._skj_ratechange_captured = true;
+        video.addEventListener(
+          'ratechange',
+          (e) => {
+            e.stopImmediatePropagation();
+          },
+          true
+        );
+      }
+
+      // 仅在真实倍速未同步时执行原生赋值
+      if (Math.abs((video._skj_real_rate || 1.0) - targetRate) > 0.05) {
+        const nativeDesc =
+          ifrWin._skj_native_rate_desc ||
+          Object.getOwnPropertyDescriptor(ifrWin.HTMLMediaElement.prototype, 'playbackRate');
+
+        if (nativeDesc && nativeDesc.set) {
+          video._skj_setting_real_rate = true;
+          try {
+            nativeDesc.set.call(video, targetRate);
+            video._skj_real_rate = targetRate;
+            AppState.log(`已将视频播放倍速设置为: ${targetRate}x`);
+          } catch (e) {
+            video.playbackRate = targetRate;
+            video._skj_real_rate = targetRate;
+          } finally {
+            video._skj_setting_real_rate = false;
+          }
+        } else {
+          video._skj_setting_real_rate = true;
+          try {
+            video.playbackRate = targetRate;
+            video._skj_real_rate = targetRate;
+            AppState.log(`已将视频播放倍速设置为: ${targetRate}x`);
+          } finally {
+            video._skj_setting_real_rate = false;
+          }
+        }
+      }
+
+      // 适配超星内部 Video.js 播放器实例
+      if (ifrWin.videojs) {
+        try {
+          const players = ifrWin.videojs.players || {};
+          const p = players[video.id] || (typeof ifrWin.videojs === 'function' ? ifrWin.videojs(video) : null);
+          if (p) {
+            // 解锁超星 studyControl 限制 (允许快进与切换窗口)
+            if (p.studyControl) {
+              p.studyControl.enableSwitchWindow = 1;
+              p.studyControl.enableFastForward = 1;
+            }
+            if (typeof p.playbackRate === 'function' && Math.abs((p.playbackRate() || 1.0) - targetRate) > 0.05) {
+              try {
+                p.playbackRate(targetRate);
+              } catch (e) {}
+            }
+          }
+        } catch (e) {}
       }
     }
 
@@ -1958,6 +2069,16 @@
         this.videoAssist.triggerNextChapter();
       });
 
+      // 监听视频倍速实时变动
+      document.getElementById('skj-cfg-playbackRate')?.addEventListener('change', (e) => {
+        const newRate = parseFloat(e.target.value) || 1.0;
+        Storage.set('playbackRate', newRate);
+        const videos = this.videoAssist.findMediaElements();
+        for (const v of videos) {
+          this.videoAssist.applyPlaybackRate(v, newRate);
+        }
+      });
+
       // 清空日志
       document.getElementById('skj-quick-clear-btn')?.addEventListener('click', () => {
         AppState.logs = [];
@@ -1981,6 +2102,12 @@
         autoSubmit: document.getElementById('skj-cfg-autoSubmit').checked
       };
       setConfig(newCfg);
+
+      // 立即向当前页面所有视频同步新设定的倍速
+      const videos = this.videoAssist.findMediaElements();
+      for (const v of videos) {
+        this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
+      }
     }
 
     toggleModal(show) {

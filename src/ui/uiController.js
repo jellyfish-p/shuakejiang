@@ -322,6 +322,16 @@ class UIController {
       this.videoAssist.triggerNextChapter();
     });
 
+    // 监听视频倍速实时变动
+    document.getElementById('skj-cfg-playbackRate')?.addEventListener('change', (e) => {
+      const newRate = parseFloat(e.target.value) || 1.0;
+      Storage.set('playbackRate', newRate);
+      const videos = this.videoAssist.findMediaElements();
+      for (const v of videos) {
+        this.videoAssist.applyPlaybackRate(v, newRate);
+      }
+    });
+
     // 清空日志
     document.getElementById('skj-quick-clear-btn')?.addEventListener('click', () => {
       AppState.logs = [];
@@ -345,6 +355,12 @@ class UIController {
       autoSubmit: document.getElementById('skj-cfg-autoSubmit').checked
     };
     setConfig(newCfg);
+
+    // 立即向当前页面所有视频同步新设定的倍速
+    const videos = this.videoAssist.findMediaElements();
+    for (const v of videos) {
+      this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
+    }
   }
 
   toggleModal(show) {
