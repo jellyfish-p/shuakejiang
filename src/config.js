@@ -4,11 +4,27 @@
 const Storage = {
   get(key, defaultVal) {
     try {
+      let gmVal = undefined;
       if (typeof GM_getValue !== 'undefined') {
-        return GM_getValue(key, defaultVal);
+        gmVal = GM_getValue(key, undefined);
       }
-      const val = localStorage.getItem('skj_' + key);
-      return val !== null ? JSON.parse(val) : defaultVal;
+      if (gmVal !== undefined && gmVal !== null && gmVal !== '') {
+        return gmVal;
+      }
+      const localVal = localStorage.getItem('skj_' + key);
+      if (localVal !== null && localVal !== undefined) {
+        const parsed = JSON.parse(localVal);
+        if (parsed !== undefined && parsed !== null && parsed !== '') {
+          // 同步回 GM_setValue 实现跨域多平台全局共享
+          if (typeof GM_setValue !== 'undefined') {
+            try {
+              GM_setValue(key, parsed);
+            } catch (e) {}
+          }
+          return parsed;
+        }
+      }
+      return gmVal !== undefined && gmVal !== null ? gmVal : defaultVal;
     } catch (e) {
       return defaultVal;
     }
@@ -17,9 +33,10 @@ const Storage = {
     try {
       if (typeof GM_setValue !== 'undefined') {
         GM_setValue(key, val);
-        return;
       }
-      localStorage.setItem('skj_' + key, JSON.stringify(val));
+      try {
+        localStorage.setItem('skj_' + key, JSON.stringify(val));
+      } catch (e) {}
     } catch (e) {
       console.error('[刷客酱] 保存配置失败:', e);
     }
@@ -42,7 +59,7 @@ const DEFAULT_CONFIG = {
   openaiApiKey: '',
   openaiModel: 'gpt-4o-mini',
   openaiTemperature: 0.1,
-  autoSubmit: false,
+  autoSubmit: true, // 默认开启做题自动提交
   solveInterval: 2000, // 每题间隔（毫秒）
 
   // 界面设置

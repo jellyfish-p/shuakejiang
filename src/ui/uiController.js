@@ -240,7 +240,7 @@ class UIController {
             <div class="skj-switch-item">
               <div>
                 <div class="skj-switch-text">做完后自动提交</div>
-                <div class="skj-form-desc">关闭时仅自动填入和暂存，不点最终提交按钮</div>
+                <div class="skj-form-desc">开启后自动填入、暂存并自动点击提交按钮完成测验</div>
               </div>
               <label class="skj-switch">
                 <input type="checkbox" id="skj-cfg-autoSubmit" ${cfg.autoSubmit ? 'checked' : ''}>
@@ -249,8 +249,8 @@ class UIController {
             </div>
 
             <div class="skj-alert">
-              <span>⚠️</span>
-              <span>建议保持【自动提交】关闭，以便您人工检查 AI 做题结果后再手动点击提交。</span>
+              <span>💡</span>
+              <span>已默认开启【自动提交】，答题完毕后将自动确认提交。如需人工检查核对，可在此处关闭此开关。</span>
             </div>
 
             <div style="display: flex; gap: 10px; margin-top: 16px;">
@@ -380,6 +380,16 @@ class UIController {
 
   saveCurrentInputs(silent = false) {
     const rateEl = document.getElementById('skj-cfg-playbackRate');
+
+    // 读取已存储的配置，防止切换标签页或部分控件为空时意外抹除已配置的 API 信息
+    const curBaseUrl = Storage.get('openaiBaseUrl', DEFAULT_CONFIG.openaiBaseUrl);
+    const curApiKey = Storage.get('openaiApiKey', '');
+    const curModel = Storage.get('openaiModel', DEFAULT_CONFIG.openaiModel);
+
+    const inputBaseUrl = document.getElementById('skj-cfg-openaiBaseUrl')?.value.trim();
+    const inputApiKey = document.getElementById('skj-cfg-openaiApiKey')?.value.trim();
+    const inputModel = document.getElementById('skj-cfg-openaiModel')?.value.trim();
+
     const newCfg = {
       videoEnabled: document.getElementById('skj-cfg-videoEnabled')?.checked ?? true,
       autoNext: document.getElementById('skj-cfg-autoNext')?.checked ?? true,
@@ -389,10 +399,11 @@ class UIController {
       playbackRate: parseFloat(rateEl?.value || '1.0'),
 
       examEnabled: document.getElementById('skj-cfg-examEnabled')?.checked ?? true,
-      openaiBaseUrl: document.getElementById('skj-cfg-openaiBaseUrl')?.value.trim() || 'https://api.openai.com/v1',
-      openaiApiKey: document.getElementById('skj-cfg-openaiApiKey')?.value.trim() || '',
-      openaiModel: document.getElementById('skj-cfg-openaiModel')?.value.trim() || 'gpt-4o-mini',
-      autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? false
+      // 跨域全局共享保护：有输入则更新，为空且已有存储则保留已有配置
+      openaiBaseUrl: inputBaseUrl || curBaseUrl || DEFAULT_CONFIG.openaiBaseUrl,
+      openaiApiKey: inputApiKey !== undefined && inputApiKey !== '' ? inputApiKey : curApiKey,
+      openaiModel: inputModel || curModel || DEFAULT_CONFIG.openaiModel,
+      autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? true
     };
     setConfig(newCfg);
 
