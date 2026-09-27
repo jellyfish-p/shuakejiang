@@ -1,0 +1,44 @@
+name: Userscript CI & Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'shuakejiang.user.js'
+      - '.github/workflows/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Syntax & Quality Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check Userscript Syntax
+        run: |
+          node --check shuakejiang.user.js
+          echo "✅ Userscript syntax check passed!"
+
+      - name: Print Userscript Meta Info
+        run: |
+          node -e '
+            const fs = require("fs");
+            const code = fs.readFileSync("shuakejiang.user.js", "utf-8");
+            const meta = code.match(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/);
+            if (meta) {
+              console.log("Found Userscript Header:\n" + meta[0]);
+            } else {
+              console.error("Missing UserScript header!");
+              process.exit(1);
+            }
+          '

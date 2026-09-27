@@ -1,0 +1,17 @@
+# Decompiled & unpacked binary assets
+extension.crx
+extension.zip
+extracted/
+beautified/
+
+# Node & dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
