@@ -77,14 +77,50 @@
 
 ---
 
-## 🛠️ 文件结构说明
+## 🛠️ 项目工程结构与二次开发
 
-| 文件 | 说明 |
-| :--- | :--- |
-| `shuakejiang.user.js` | 完整的油猴脚本源文件 |
-| `extension.crx` | 从 Edge 官方商店下载的原始插件安装包 |
-| `extracted/` | 原始插件解压后的静态资源与反编译 JS 源码 |
-| `README.md` | 使用指南与文档 |
+本项目已重构为清晰易维护的**模块化工程体系**，源码全部位于 `src/` 目录下，并提供**零外部依赖**的自动化构建脚本：
+
+```text
+├── src/
+│   ├── header.js               # 油猴 UserScript 元数据头注释配置
+│   ├── config.js               # 本地持久化存储与默认配置管理
+│   ├── index.js                # 主入口与各模块联动引导
+│   ├── core/
+│   │   ├── mediaHook.js        # HTMLMediaElement 原型链反检测倍速 Hook
+│   │   ├── site.js             # 各大网课平台特征与页面类型识别
+│   │   └── state.js            # 响应式全局状态机与日志流订阅系统
+│   ├── api/
+│   │   └── openai.js           # OpenAI / DeepSeek 标准接口适配与请求封装
+│   ├── modules/
+│   │   ├── video/
+│   │   │   └── videoAssistant.js   # 视频自动播放、防暂停、自动下一节、完成状态预检
+│   │   └── exam/
+│   │       ├── parser.js           # 题目解析与 Prompt 格式化工具
+│   │       └── examAssistant.js    # 超星/智慧树章节测验全自动答题与提交核心
+│   └── ui/
+│       ├── styles.js           # 悬浮控制面板现代化 CSS 样式表
+│       └── uiController.js     # 悬浮胶囊球拖拽、设置模态窗与控制台交互
+├── scripts/
+│   ├── build.js                # 零依赖自动化打包脚本 (支持 --watch 热重载)
+│   └── check.js                # CI 质量校验与语法/元数据完整性测试
+├── shuakejiang.user.js          # 打包生成的生产就绪油猴用户脚本
+├── package.json
+└── README.md
+```
+
+### 开发与打包命令
+
+```bash
+# 1. 执行一次性打包构建（生成/更新 shuakejiang.user.js）
+npm run build
+
+# 2. 启动文件热监听开发模式（修改 src/ 自动重新打包）
+npm run watch
+
+# 3. 运行语法与代码质量规范校验
+npm test
+```
 
 ---
 

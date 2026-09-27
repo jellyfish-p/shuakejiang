@@ -5,7 +5,10 @@ on:
     branches:
       - main
     paths:
+      - 'src/**'
+      - 'scripts/**'
       - 'shuakejiang.user.js'
+      - 'package.json'
       - '.github/workflows/**'
   pull_request:
     branches:
@@ -13,7 +16,7 @@ on:
 
 jobs:
   validate:
-    name: Syntax & Quality Check
+    name: Build & Quality Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,21 +27,15 @@ jobs:
         with:
           node-version: 20
 
-      - name: Check Userscript Syntax
+      - name: Build Userscript
         run: |
-          node --check shuakejiang.user.js
-          echo "✅ Userscript syntax check passed!"
+          node scripts/build.js
 
-      - name: Print Userscript Meta Info
+      - name: Check Build Sync
         run: |
-          node -e '
-            const fs = require("fs");
-            const code = fs.readFileSync("shuakejiang.user.js", "utf-8");
-            const meta = code.match(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/);
-            if (meta) {
-              console.log("Found Userscript Header:\n" + meta[0]);
-            } else {
-              console.error("Missing UserScript header!");
-              process.exit(1);
-            }
-          '
+          git diff --exit-code shuakejiang.user.js || (echo "❌ shuakejiang.user.js 与 src/ 源码不一致，请在提交前执行 npm run build！" && exit 1)
+
+      - name: Run Quality Tests
+        run: |
+          npm test
+
