@@ -40,7 +40,7 @@ function hookMediaWindow(win) {
           return 1.0;
         },
         set: function (val) {
-          // 仅允许刷客酱内部设置真实底层播放倍速
+          // 仅允许刷课酱内部设置真实底层播放倍速
           if (this._skj_setting_real_rate) {
             origDesc.set.call(this, val);
             this._skj_real_rate = val;
@@ -61,7 +61,7 @@ function hookMediaWindow(win) {
       });
     });
   } catch (e) {
-    console.warn('[刷客酱] HOOK HTMLMediaElement 失败:', e);
+    console.warn('[刷课酱] HOOK HTMLMediaElement 失败:', e);
   }
 }
 

@@ -26,7 +26,7 @@ class UIController {
 
     // 注册油猴菜单
     if (typeof GM_registerMenuCommand !== 'undefined') {
-      GM_registerMenuCommand('⚙️ 打开刷客酱设置', () => this.toggleModal(true));
+      GM_registerMenuCommand('⚙️ 打开刷课酱设置', () => this.toggleModal(true));
       GM_registerMenuCommand('📝 立即解答当前页面题目', () => this.examAssist.solveCurrentPage(true));
     }
   }
@@ -48,7 +48,7 @@ class UIController {
     widget.style.right = pos.right + 'px';
 
     widget.innerHTML = `
-      <div id="skj-widget-logo">🤖 刷客酱</div>
+      <div id="skj-widget-logo">🤖 刷课酱</div>
       <div id="skj-widget-status">就绪</div>
       <button id="skj-widget-btn" title="点击打开设置面板">⚙️</button>
     `;
@@ -100,8 +100,8 @@ class UIController {
       <div class="skj-dialog">
         <div class="skj-header">
           <div class="skj-header-title">
-            <span>🤖 刷客酱控制台</span>
-            <span class="skj-badge">v2.0.0</span>
+            <span>🤖 刷课酱控制台</span>
+            <span class="skj-badge">v2.1.0</span>
           </div>
           <button class="skj-close" id="skj-close-btn">&times;</button>
         </div>
@@ -265,15 +265,6 @@ class UIController {
           </div>
         </div>
 
-        <!-- 弹窗全局底部操作栏 -->
-        <div class="skj-footer">
-          <div class="skj-footer-status" id="skj-save-tip">
-            <span>⚡ 大部分设置修改后实时自动生效并保存</span>
-          </div>
-          <div style="display: flex; gap: 8px;">
-            <button class="skj-btn skj-btn-secondary" id="skj-modal-close-bottom-btn" style="padding: 6px 18px;">关闭</button>
-          </div>
-        </div>
       </div>
     `;
 

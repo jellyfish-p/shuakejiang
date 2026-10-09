@@ -2,7 +2,7 @@
  * 控制面板样式表
  * ========================================================================= */
 const UI_STYLES = `
-        /* 刷客酱主容器与字体 */
+        /* 刷课酱主容器与字体 */
         #skj-widget, #skj-modal {
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
           font-size: 14px;

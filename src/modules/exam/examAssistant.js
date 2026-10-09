@@ -1,6 +1,11 @@
 /* =========================================================================
- * 6. AI 解题助手核心实现 (DOM 提取、Prompt 组装、OpenAI 响应注入)
+ * 6. AI 解题助手核心实现
+ *    - 超星章节测验：定位 #iframe → work 任务框架 → #frame_content → 题目文档
+ *    - 超星作业/考试页：.questionLi / .answerBg / .num_option 体系
+ *    - 智慧树 作业/考试页
+ *    - 作答后按参考扩展流程：暂存 → 提交 → 结果弹窗校验（未做完/未及格自动取消）
  * ========================================================================= */
+
 class ExamAssistant {
   constructor(videoAssist = null) {
     this.videoAssist = videoAssist;
@@ -11,43 +16,37 @@ class ExamAssistant {
     this.videoAssist = videoAssist;
   }
 
-  /**
-   * 自动检测当前页面类型并启动答题流程
-   */
+  get video() {
+    return this.videoAssist;
+  }
+
+  /** 自动检测当前页面类型并启动答题流程 */
   async solveCurrentPage(manual = false) {
     if (this.isBusy) {
       AppState.log('解题任务正在运行中，请稍候...', 'warn');
       return;
     }
-
     const config = getConfig();
     if (!config.examEnabled && !manual) return;
-
-    if (!config.openaiApiKey) {
-      if (manual) AppState.log('请先在助手面板中配置 OpenAI API Key！', 'error');
+    if (!String(config.openaiApiKey || '').trim()) {
+      AppState.log('请先在控制台中配置 AI 接口（Base URL / API Key / 模型）后再自动答题', 'error');
       return;
     }
 
     this.isBusy = true;
     AppState.isSolvingQuiz = true;
     AppState.setStatus('正在解析页面题目...');
-
     try {
-      // 1. 超星章节测验 (嵌套在 iframe#frame_content 中)
-      const cxChapterFound = await this.solveChaoxingChapterTest(config);
-      if (cxChapterFound) return;
-
-      // 2. 超星独立作业与考试页 (.questionLi)
-      const cxExamFound = await this.solveChaoxingExamPage(config);
-      if (cxExamFound) return;
-
-      // 3. 智慧树在线作业与考试
-      const zhsExamFound = await this.solveZhihuishuExamPage(config);
-      if (zhsExamFound) return;
-
+      if (Site.isChaoxing) {
+        if (await this.solveChaoxingWork(config)) return;
+        if (await this.solveChaoxingQuestionLiPage(config)) return;
+      }
+      if (Site.isZhihuishu) {
+        if (await this.solveZhihuishuExamPage(config)) return;
+      }
       AppState.log('当前页面未检测到可解答的题目', 'warn');
     } catch (err) {
-      AppState.log('答题异常: ' + err.message, 'error');
+      AppState.log('答题异常: ' + (err && err.message ? err.message : err), 'error');
     } finally {
       this.isBusy = false;
       AppState.isSolvingQuiz = false;
@@ -55,356 +54,669 @@ class ExamAssistant {
     }
   }
 
-  /**
-   * 解答超星学习通章节测验 (iframe 内嵌)
-   */
+  /* =====================================================================
+   * 超星章节测验
+   * =================================================================== */
+
+  /** 学习页中的测验任务点（兼容旧接口名） */
   async solveChaoxingChapterTest(config) {
-    // 遍历查找含有 #ZyBottom 的文档
-    let targetDoc = null;
+    return this.solveChaoxingWork(config);
+  }
+
+  async solveChaoxingWork(config) {
+    if (!Site.isCxStudentStudy) return false;
+    const studyDoc = CxDom.studyDoc();
+    if (!studyDoc) return false;
+    const tasks = CxDom.listTasks(studyDoc);
+    if (!tasks) return false;
+    const workTask = tasks.find((t) => t.type === 'work');
+    if (!workTask) return false;
+    const iframe = CxDom.taskIframeOf(studyDoc, workTask);
+    if (!iframe) return false;
+
+    const doc = await skjWaitFor(() => CxDom.workDoc(iframe), { timeout: 20000, interval: 500 });
+    if (!doc) return false;
+    await this.solveCxWorkDoc(doc, config);
+    return true;
+  }
+
+  /**
+   * 解答一个超星章节测验文档
+   * @returns {{status:'done'|'failed', reason:string, submitSafe:boolean}}
+   */
+  async solveCxWorkDoc(doc, config) {
+    const status = CxDom.workStatus(doc);
+    if (status === 'complete' || status === 'pendingReview' || status === 'teacherIncomplete') {
+      AppState.log(`当前章节测验状态：${status}，无需作答`);
+      return { status: 'done', reason: status, submitSafe: true };
+    }
+
+    // 超星字体混淆（font-cxsecret）会把题干文字替换为图形字体，识别结果不可靠，宁可不答也不乱答
+    if (CxDom.hasFontObfuscation(doc)) {
+      AppState.log('该测验启用了超星字体混淆，为避免提交错误答案已跳过自动作答，请手动完成', 'warn');
+      return { status: 'done', reason: 'font_obfuscated', submitSafe: false };
+    }
+
+    const questions = Array.from(doc.querySelectorAll('#ZyBottom .singleQuesId'));
+    if (!questions.length) {
+      AppState.log('当前测验未识别到题目，已暂存后跳过', 'warn');
+      await this.saveCxWork(doc, { submit: false });
+      return { status: 'done', reason: 'no_question', submitSafe: false };
+    }
+
+    AppState.log(`检测到章节测验，共 ${questions.length} 道题，开始 AI 作答...`);
+    let ok = 0;
+    let failed = 0;
+
+    for (let i = 0; i < questions.length; i++) {
+      const qEl = questions[i];
+      AppState.setStatus(`正在解答章节测验 ${i + 1}/${questions.length}...`);
+      try {
+        const questionType = this.getCxQuestionType(qEl);
+        const { stem, options, optEls } = this.extractCxQuestion(qEl, questionType);
+        const prompt = buildQuestionPrompt(questionType, stem, options);
+        const raw = await requestOpenAI(prompt, null, config);
+        const answer = parseAnswerFromLLM(questionType, raw);
+        AppState.log(`[测验 ${i + 1}/${questions.length}] ${questionType} → ${answer}`);
+        const filled = this.fillCxQuestion(qEl, questionType, answer, optEls);
+        if (filled) ok += 1;
+        else failed += 1;
+      } catch (err) {
+        failed += 1;
+        AppState.log(`[测验 ${i + 1}/${questions.length}] 作答失败: ${err.message}`, 'error');
+      }
+      await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
+    }
+
+    AppState.log(`章节测验作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
+
+    if (config.autoSubmit && failed === 0) {
+      const reason = await this.saveCxWork(doc, { submit: true });
+      return { status: 'done', reason, submitSafe: reason === 'submitted' };
+    }
+    await this.saveCxWork(doc, { submit: false });
+    return {
+      status: 'done',
+      reason: failed ? `partial_saved(${failed}题未完成)` : 'saved',
+      submitSafe: false
+    };
+  }
+
+  /** 识别章节测验题目类型 */
+  getCxQuestionType(qEl) {
+    const TYPE_MAP = {
+      0: '单选题',
+      1: '多选题',
+      2: '填空题',
+      3: '判断题',
+      4: '简答题',
+      5: '名词解释',
+      6: '论述题',
+      7: '计算题',
+      8: '其他题',
+      9: '分录题',
+      10: '资料题',
+      11: '连线题',
+      14: '完形填空',
+      15: '阅读理解'
+    };
     try {
-      const topIframe = document.querySelector('#iframe');
-      if (topIframe) {
-        const doc1 = topIframe.contentDocument;
-        const innerIframe = doc1?.querySelector('#frame_content');
-        if (innerIframe?.contentDocument?.querySelector('#ZyBottom')) {
-          targetDoc = innerIframe.contentDocument;
-        }
-      }
-      if (!targetDoc && document.querySelector('#ZyBottom')) {
-        targetDoc = document;
-      }
+      const val = qEl.querySelector('input[id^="answertype"]')?.value;
+      const num = parseInt(val, 10);
+      if (!Number.isNaN(num) && TYPE_MAP[num]) return TYPE_MAP[num];
     } catch (e) {}
+    const title = qEl.querySelector('.Zy_TItle')?.innerText || qEl.innerText || '';
+    const m = title.match(/【([^】]+题)】/);
+    return m ? m[1] : '单选题';
+  }
 
-    if (!targetDoc) return false;
+  /** 提取章节测验题干与选项 */
+  extractCxQuestion(qEl, questionType) {
+    const isMulti = questionType === '多选题';
+    let optEls = Array.from(qEl.querySelectorAll(isMulti ? '.before-after-checkbox' : '.before-after'));
+    if (!optEls.length) optEls = Array.from(qEl.querySelectorAll('.before-after, .before-after-checkbox'));
+    const stemEl = qEl.querySelector('.Zy_TItle');
+    const stem = ((stemEl ? stemEl.innerText : qEl.innerText) || '')
+      .replace(/【[^】]*】/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const options = optEls.map((el) => el.innerText.trim());
+    return { stem, options, optEls };
+  }
 
-    // 检查当前测验是否已经提交或批阅完成 (无需作答)
-    const isComplete = this.videoAssist?.isChapterQuizComplete(targetDoc) ?? (
-      targetDoc.querySelector('.testTit_status, .ceyan_status')?.classList?.contains('testTit_status_complete') ||
-      targetDoc.body?.innerText?.includes('待批阅') ||
-      targetDoc.querySelector('.Zy_sub')?.innerText?.includes('已完成')
-    );
+  /** 按题型填入章节测验答案 */
+  fillCxQuestion(qEl, questionType, answer, optEls, doc) {
+    const list = optEls && optEls.length ? optEls : Array.from(qEl.querySelectorAll('.before-after, .before-after-checkbox'));
 
-    if (isComplete) {
-      AppState.log('检测到当前章节测验已完成，跳过作答');
-      if (config.autoNext) {
-        AppState.log('准备自动跳转下一节/下一章...');
-        setTimeout(() => {
-          if (this.videoAssist) {
-            this.videoAssist.triggerNextChapter();
-          } else {
-            new VideoAssistant().triggerNextChapter();
-          }
-        }, 2000);
+    if (questionType === '单选题') {
+      const target = list.find((el) => skjOptionMatches(el.innerText, answer));
+      if (!target) return false;
+      const input = target.querySelector('[name^=answer]');
+      if (input && (input.classList.contains('check_answer') || input.classList.contains('check_answer_dx'))) {
+        return true;
       }
+      skjHumanClick(target.closest('.before-after') || target);
       return true;
     }
 
-    const questions = Array.from(targetDoc.querySelectorAll('#ZyBottom .singleQuesId'));
-    if (questions.length === 0) return false;
-
-    AppState.log(`检测到超星章节测验，共 ${questions.length} 道题`);
-
-    for (let i = 0; i < questions.length; i++) {
-      const qEl = questions[i];
-      AppState.setStatus(`正在解答章节测验第 ${i + 1}/${questions.length} 题...`);
-
-      try {
-        // 题型识别
-        const typeVal = parseInt(qEl.querySelector('input[id^="answertype"]')?.value || '0', 10);
-        const typeMap = {
-          0: '单选题',
-          1: '多选题',
-          2: '填空题',
-          3: '判断题',
-          4: '简答题',
-          5: '名词解释',
-          6: '论述题',
-          7: '计算题',
-          9: '分录题',
-          10: '资料题',
-          11: '连线题'
-        };
-        const questionType = typeMap[typeVal] || '单选题';
-
-        // 题干与选项提取
-        const stemEl = qEl.querySelector('.Zy_TItle');
-        const stem = (stemEl ? stemEl.innerText : qEl.innerText).replace(/【.*?题】/, '').trim();
-
-        const isMultiple = questionType === '多选题';
-        const optEls = Array.from(
-          qEl.querySelectorAll(isMultiple ? '.before-after-checkbox' : '.before-after')
+    if (questionType === '多选题') {
+      let hit = false;
+      list.forEach((el) => {
+        const input = el.querySelector('[name^=answercheck]') || el.querySelector('input');
+        // 与参考扩展一致：以选项容器（或答案输入元）上的字母作为选项标识
+        const letter =
+          skjLeadingLetter(el.innerText) ||
+          (input ? (input.innerText || '').trim() || String(input.value || '').trim() : '');
+        const checked = !!(
+          input &&
+          (input.classList.contains('check_answer') ||
+            input.classList.contains('check_answer_dx') ||
+            input.checked)
         );
-        const options = optEls.map((el) => el.innerText.trim());
-
-        AppState.log(`[第${i + 1}题] ${questionType} - ${stem.slice(0, 30)}...`);
-
-        // 请求大模型求解
-        const prompt = buildQuestionPrompt(questionType, stem, options);
-        const aiResponse = await requestOpenAI(prompt, null, config);
-        const answer = parseAnswerFromLLM(questionType, aiResponse);
-        AppState.log(`[第${i + 1}题] AI 回答: ${answer}`);
-
-        // DOM 选项填入
-        this.fillChaoxingChapterAnswer(qEl, questionType, answer, optEls);
-
-        // 间隔延迟
-        await new Promise((r) => setTimeout(r, config.solveInterval || 2000));
-      } catch (err) {
-        AppState.log(`[第${i + 1}题] 答题失败: ${err.message}`, 'error');
-      }
+        const should = !!letter && String(answer).toUpperCase().includes(String(letter).toUpperCase());
+        if (should) hit = true;
+        if (should !== checked) skjHumanClick(input || el);
+      });
+      return hit;
     }
 
-    // 暂存与自动提交处理
-    AppState.log('章节测验全部题目解答完毕！');
-    try {
-      const saveBtn = targetDoc.querySelector('.ZY_sub .btnSave, .btnSave.workBtnIndex');
-      if (saveBtn) {
-        saveBtn.removeAttribute('href');
-        saveBtn.click();
-        AppState.log('已自动保存测验答案');
+    if (questionType === '判断题') {
+      const ans = String(answer);
+      const target =
+        list.find((el) => {
+          const text = el.innerText.trim();
+          return text.includes(ans.charAt(0));
+        }) || list[0];
+      if (!target) return false;
+      const input = target.querySelector('[name^=answer]');
+      if (input && (input.classList.contains('check_answer') || input.classList.contains('check_answer_dx'))) {
+        return true;
       }
+      skjHumanClick(target.closest('.before-after') || target);
+      return true;
+    }
 
-      if (config.autoSubmit) {
-        await new Promise((r) => setTimeout(r, 2000));
-        const submitBtn = targetDoc.querySelector('.btnSubmit.workBtnIndex');
-        if (submitBtn) {
-          submitBtn.removeAttribute('href');
-          submitBtn.click();
-          // 确认弹窗
-          setTimeout(() => {
-            const confirmBtn = targetDoc.querySelector('#workpop .popConfirm, .workpop-confirm');
-            confirmBtn?.click();
-            AppState.log('已自动提交章节测验！');
-          }, 1000);
+    if (questionType === '填空题' || questionType === '分录题' || questionType === '资料题' || questionType === '完形填空') {
+      const blanks = Array.from(qEl.querySelectorAll('.blankItemDiv'));
+      if (!blanks.length) return false;
+      const parts = String(answer).split('#');
+      blanks.forEach((blank, i) => {
+        const value = (parts[i] || parts[0] || '').trim();
+        const textarea = blank.querySelector('textarea');
+        const inpDiv = blank.querySelector('.InpDIV');
+        const editor = blank.querySelector('iframe');
+        if (textarea) {
+          textarea.value = value;
+          skjFireInput(textarea);
         }
+        if (inpDiv) inpDiv.innerHTML = `<p>${skjEscapeHtml(value)}</p>`;
+        try {
+          const body = editor?.contentDocument?.body?.querySelector('p');
+          if (body) body.innerHTML = skjEscapeHtml(value);
+        } catch (e) {}
+      });
+      return true;
+    }
+
+    if (questionType === '连线题') {
+      return this.fillCxLineAnswer(qEl, answer);
+    }
+
+    // 简答题 / 名词解释 / 论述题 / 计算题 / 其他题 / 阅读理解
+    const value = String(answer).replace(/^#+|#+$/g, '').replace(/#+/g, ',');
+    let filled = false;
+    const textarea = qEl.querySelector('.Zy_ulTk li textarea, .Zy_ulTk textarea, .Zy_TItle textarea');
+    if (textarea) {
+      textarea.value = value;
+      skjFireInput(textarea);
+      filled = true;
+    }
+    try {
+      const body = qEl.querySelector('.Zy_ulTk iframe')?.contentDocument?.body?.querySelector('p');
+      if (body) {
+        body.innerHTML = skjEscapeHtml(value);
+        filled = true;
       }
     } catch (e) {}
+    return filled;
+  }
 
-    // 核心修复：作答完毕后自动跳转下一节/下一章
-    if (config.autoNext) {
-      AppState.log('章节测验已完成，准备自动跳转下一节/下一章...');
+  /** 连线题填入 */
+  fillCxLineAnswer(qEl, answer) {
+    const list = qEl.querySelector('.beautiSelect .thirdUlList');
+    if (!list) return false;
+    const parts = String(answer).split(/[\n,]/);
+    parts.forEach((part, i) => {
       setTimeout(() => {
-        if (this.videoAssist) {
-          this.videoAssist.triggerNextChapter();
-        } else {
-          new VideoAssistant().triggerNextChapter();
+        const clean = part.replace(/[-、\s.#]/g, '');
+        const m = clean.match(/(\d+)([A-Za-z]+)/);
+        if (!m) return;
+        const li = list.querySelector(`li[index="${m[1]}"]`);
+        if (!li) return;
+        const option = li.querySelector(`[value="${m[2]}"]`);
+        const label = li.querySelector('.chosen-single span');
+        if (option) {
+          option.selected = true;
+          if (label) label.innerText = m[2];
         }
-      }, 3500);
-    }
+      }, 50 * i);
+    });
+    return true;
+  }
 
+  /* =====================================================================
+   * 超星 暂存 / 提交 / 结果校验
+   * =================================================================== */
+
+  collectDocs(extra = []) {
+    return skjCollectDocs(document).concat(extra.filter(Boolean));
+  }
+
+  findVisiblePopup(extra = []) {
+    const docs = this.collectDocs(extra);
+    for (const selector of ['#workpop', '#workpopFocus', '.workpop', '#popup_container']) {
+      for (const doc of docs) {
+        try {
+          const el = doc.querySelector(selector);
+          if (el && skjIsDisplayed(el)) return el;
+        } catch (e) {}
+      }
+    }
+    return null;
+  }
+
+  /** 提交后的二级结果弹窗（#workpopFocus） */
+  findFocusPopup(extra = []) {
+    const docs = this.collectDocs(extra);
+    for (const doc of docs) {
+      try {
+        const el = doc.getElementById('workpopFocus');
+        if (el && skjIsDisplayed(el)) return el;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  readPopupContent(extra = []) {
+    const docs = this.collectDocs(extra);
+    for (const selector of ['#popcontent', '.popcontent', '.popBottom .content']) {
+      const el = skjQueryDocs(docs, selector);
+      if (el) return el.innerText || '';
+    }
+    return '';
+  }
+
+  clickPopupButton(extra = [], selector = '') {
+    const docs = this.collectDocs(extra);
+    const el = skjQueryDocs(docs, selector);
+    if (!el) return false;
+    skjHumanClick(el);
     return true;
   }
 
   /**
-   * 填入超星章节测验 DOM
+   * 章节测验暂存 / 提交
+   * @returns 'saved'|'submitted'|'submitted_unverified'|'incomplete'|'nopass'|'error'
    */
-  fillChaoxingChapterAnswer(qEl, questionType, answer, optEls) {
-    if (questionType === '单选题') {
-      const target = optEls.find((el) => {
-        const txt = el.innerText.trim();
-        const m = txt.match(/([A-Ha-h])/);
-        return (m && m[1].toUpperCase() === answer) || txt === answer;
-      });
-      if (target) {
-        const input = target.querySelector('[name^=answer]');
-        if (!input?.classList.contains('check_answer') && !input?.classList.contains('check_answer_dx')) {
-          target.click();
-        }
+  async saveCxWork(doc, options = {}) {
+    const submit = !!options.submit;
+    try {
+      // 1) 暂存答案
+      const subBar = doc.querySelector('.ZY_sub.clearfix, .ZY_sub');
+      if (subBar) skjHumanClick(subBar);
+      const saveBtn = doc.querySelector('.btnSave.workBtnIndex, .ZY_sub .btnSave, .btnSave');
+      if (saveBtn) {
+        skjHumanClick(saveBtn);
+        AppState.log('已暂存章节测验答案');
       }
-    } else if (questionType === '多选题') {
-      optEls.forEach((el) => {
-        const m = el.innerText.trim().match(/([A-Ha-h])/);
-        const letter = m ? m[1].toUpperCase() : '';
-        const input = el.querySelector('[name^=answercheck]');
-        const isSelected = input?.classList.contains('check_answer') || input?.classList.contains('check_answer_dx');
-        const shouldSelect = letter && answer.includes(letter);
-        if (shouldSelect !== isSelected) {
-          el.click();
+      await skjSleep(1200);
+      if (!submit) return 'saved';
+
+      // 2) 提交
+      const submitBtn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
+      if (!submitBtn) {
+        AppState.log('未找到测验提交按钮，已保留暂存结果', 'warn');
+        return 'saved';
+      }
+      skjHumanClick(submitBtn);
+
+      // 3) 结果弹窗判定（对齐参考扩展：未做完 / 未达到及格线 自动取消）
+      const popup = await skjWaitFor(() => this.findVisiblePopup([doc]), { timeout: 8000, interval: 250 });
+      if (popup) {
+        const content = this.readPopupContent([doc]);
+        if (content.includes('未做完')) {
+          this.clickPopupButton([doc], '#popno, .popno');
+          AppState.log('平台提示仍有未作答题目，已取消提交（答案已暂存）', 'warn');
+          return 'incomplete';
         }
-      });
-    } else if (questionType === '判断题') {
-      const target = optEls.find((el) => {
-        const txt = el.innerText.trim();
-        return txt.includes(answer.charAt(0));
-      }) || optEls[0];
-      target?.click();
-    } else if (questionType === '填空题') {
-      const blanks = Array.from(qEl.querySelectorAll('.blankItemDiv'));
-      const parts = answer.split('#');
-      blanks.forEach((blank, idx) => {
-        const val = (parts[idx] || parts[0] || '').trim();
-        const ta = blank.querySelector('textarea');
-        const inpDiv = blank.querySelector('.InpDIV');
-        if (ta) ta.value = val;
-        if (inpDiv) inpDiv.innerHTML = `<p>${val}</p>`;
-      });
-    } else {
-      // 简答题
-      const ta = qEl.querySelector('.Zy_ulTk textarea');
-      if (ta) ta.value = answer;
+        if (content.includes('未达到及格线')) {
+          this.clickPopupButton([doc], '#popno, .popno');
+          AppState.log('平台提示未达到及格线，已取消提交（答案已暂存）', 'warn');
+          return 'nopass';
+        }
+        this.clickPopupButton([doc], '#popok, .popok');
+        AppState.log('已自动确认提交章节测验');
+
+        // 3.1 二级结果弹窗（#workpopFocus）：未达到及格线时同样取消提交
+        const focusPopup = await skjWaitFor(() => this.findFocusPopup([doc]), { timeout: 6000, interval: 300 });
+        if (focusPopup) {
+          const focusText = this.readPopupContent([doc]);
+          if (focusText.includes('未达到及格线')) {
+            this.clickPopupButton([doc], '#popno, .popno');
+            AppState.log('平台提示未达到及格线，已取消提交（答案已暂存）', 'warn');
+            return 'nopass';
+          }
+          this.clickPopupButton([doc], '#popok, .popok');
+        }
+      } else {
+        AppState.log('未检测到提交确认弹窗（可能已直接提交）', 'warn');
+      }
+
+      // 4) 校验结果视图
+      const verified = await skjWaitFor(
+        () =>
+          CxDom.isWorkResultView(doc) ||
+          ['complete', 'pendingReview', 'teacherIncomplete'].includes(CxDom.workStatus(doc)),
+        { timeout: 12000, interval: 500 }
+      );
+      return verified ? 'submitted' : 'submitted_unverified';
+    } catch (err) {
+      AppState.log('暂存/提交异常: ' + err.message, 'error');
+      return 'error';
     }
   }
 
-  /**
-   * 解答超星独立作业与考试页 (.questionLi)
-   */
-  async solveChaoxingExamPage(config) {
+  /* =====================================================================
+   * 超星 独立作业 / 考试页（.questionLi）
+   * =================================================================== */
+
+  /** 题型识别（作业页） */
+  detectQuestionLiType(qEl) {
+    const title = qEl.querySelector('.mark_name .colorShallow, h3, .Zy_TItle')?.innerText || '';
+    const list = [
+      '单选题',
+      '多选题',
+      '判断题',
+      '填空题',
+      '简答题',
+      '名词解释',
+      '论述题',
+      '计算题',
+      '分录题',
+      '资料题',
+      '连线题',
+      '其他题'
+    ];
+    const hit = list.find((t) => title.includes(t));
+    if (hit) return hit;
+    const m = (title + qEl.innerText).match(/【([^】]+题)】/);
+    return m ? m[1] : '单选题';
+  }
+
+  async solveChaoxingQuestionLiPage(config) {
     const questions = Array.from(document.querySelectorAll('.questionLi'));
-    if (questions.length === 0) return false;
+    if (!questions.length) return false;
 
     AppState.log(`检测到超星作业/考试页面，共 ${questions.length} 道题`);
+    let ok = 0;
+    let failed = 0;
 
     for (let i = 0; i < questions.length; i++) {
       const qEl = questions[i];
-      AppState.setStatus(`正在解答作业/考试第 ${i + 1}/${questions.length} 题...`);
-
+      AppState.setStatus(`正在解答作业/考试 ${i + 1}/${questions.length}...`);
       try {
-        // 题型识别
-        const titleEl = qEl.querySelector('h3, .Zy_TItle');
-        const titleText = titleEl ? titleEl.innerText : qEl.innerText;
-        const typeMatch = titleText.match(/([一-龥]+题)/);
-        const questionType = typeMatch ? typeMatch[1] : '单选题';
-
-        const stem = titleText.replace(/【.*?题】|\d+\s*[\.、]/, '').trim();
-
-        // 选项提取
+        const questionType = this.detectQuestionLiType(qEl);
+        const stemEl = qEl.querySelector('.mark_name .qtContent, h3, .Zy_TItle');
+        const stem = ((stemEl ? stemEl.innerText : qEl.innerText) || '')
+          .replace(/【[^】]*】/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
         const optEls = Array.from(qEl.querySelectorAll('.answerBg'));
         const options = optEls.map((el) => el.innerText.trim());
-
-        AppState.log(`[第${i + 1}题] ${questionType} - ${stem.slice(0, 30)}...`);
-
-        // 请求大模型
         const prompt = buildQuestionPrompt(questionType, stem, options);
-        const aiResponse = await requestOpenAI(prompt, null, config);
-        const answer = parseAnswerFromLLM(questionType, aiResponse);
-        AppState.log(`[第${i + 1}题] AI 回答: ${answer}`);
-
-        // 填入选项
-        this.fillChaoxingExamAnswer(qEl, questionType, answer, optEls);
-
-        await new Promise((r) => setTimeout(r, config.solveInterval || 2000));
+        const raw = await requestOpenAI(prompt, null, config);
+        const answer = parseAnswerFromLLM(questionType, raw);
+        AppState.log(`[作业 ${i + 1}/${questions.length}] ${questionType} → ${answer}`);
+        const filled = this.fillQuestionLiAnswer(qEl, questionType, answer, optEls);
+        if (filled) ok += 1;
+        else failed += 1;
       } catch (err) {
-        AppState.log(`[第${i + 1}题] 答题异常: ${err.message}`, 'error');
+        failed += 1;
+        AppState.log(`[作业 ${i + 1}/${questions.length}] 作答失败: ${err.message}`, 'error');
       }
+      await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
     }
 
-    AppState.log('超星作业/考试所有题目解答完成！');
-    try {
-      const tempSave = document.querySelector('#submitFocus a, .btnSave');
-      if (tempSave && tempSave.innerText.includes('暂存')) {
-        tempSave.click();
-        AppState.log('已自动点击暂时保存');
-      }
-
-      if (config.autoSubmit) {
-        const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
-        if (completeBtn) {
-          completeBtn.click();
-          setTimeout(() => {
-            document.querySelector('#popok, .popBottom .confirm')?.click();
-            AppState.log('已自动确认提交作业/考试！');
-          }, 1000);
-        }
-      }
-    } catch (e) {}
-
+    AppState.log(`作业/考试作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
+    await this.saveQuestionLiPage(config, failed);
     return true;
   }
 
-  /**
-   * 填入超星作业/考试选项
-   */
-  fillChaoxingExamAnswer(qEl, questionType, answer, optEls) {
+  /** 填入 .questionLi 结构答案（对齐参考扩展 cxExam 的填入逻辑） */
+  fillQuestionLiAnswer(qEl, questionType, answer, optEls) {
+    const list = optEls && optEls.length ? optEls : Array.from(qEl.querySelectorAll('.answerBg'));
+    try {
+      qEl.scrollIntoView({ block: 'center' });
+    } catch (e) {}
+
     if (questionType.includes('单选')) {
-      const target = optEls.find((el) => {
-        const txt = el.innerText.trim();
-        const m = txt.match(/([A-Ha-h])/);
-        return (m && m[1].toUpperCase() === answer) || txt === answer;
+      const idx = list.findIndex((el, n) => {
+        const text = (list[n]?.innerText || '').trim();
+        return skjOptionMatches(text, answer) || text === String(answer).trim();
       });
-      if (target) {
-        const icon = target.querySelector('.num_option');
-        if (!icon?.classList.contains('check_answer')) {
-          target.click();
+      if (idx < 0) return false;
+      const icon = list[idx].querySelector('.num_option');
+      if (icon && icon.classList.contains('check_answer')) return true;
+      skjHumanClick(icon || list[idx]);
+      return true;
+    }
+
+    if (questionType.includes('多选')) {
+      let hit = false;
+      list.forEach((el, n) => {
+        const icon = el.querySelector('.num_option_dx') || el.querySelector('.num_option');
+        if (!icon) return;
+        const label = (icon.innerText || '').trim();
+        const should = !!label && String(answer).includes(label);
+        const checked = icon.classList.contains('check_answer_dx') || icon.classList.contains('check_answer');
+        if (should) hit = true;
+        if (should !== checked) setTimeout(() => skjHumanClick(icon), 500 * n);
+      });
+      return hit;
+    }
+
+    if (questionType.includes('判断')) {
+      const first = String(answer).replace(/\r|\n/g, '').charAt(0);
+      const idx = list.findIndex((el) => (el.innerText || '').includes(first));
+      const target = idx >= 0 ? list[idx] : list[0];
+      if (!target) return false;
+      const icon = target.querySelector('.num_option');
+      if (icon && icon.classList.contains('check_answer')) return true;
+      skjHumanClick(icon || target);
+      return true;
+    }
+
+    if (questionType.includes('连线')) {
+      return this.fillCxLineAnswer(qEl, answer);
+    }
+
+    if (
+      questionType.includes('填空') ||
+      questionType.includes('分录') ||
+      questionType.includes('资料')
+    ) {
+      const blanks = Array.from(qEl.querySelectorAll('.Answer'));
+      if (!blanks.length) return false;
+      let parts = String(answer).replace(/^#+|#+$/g, '').split('#');
+      if (blanks.length === 1 && parts.length > 1) parts = [parts.join(';')];
+      blanks.forEach((blank, i) => {
+        const value = (parts[i] || parts[0] || '').trim();
+        const textarea = blank.querySelector('textarea');
+        if (textarea) {
+          textarea.value = value;
+          skjFireInput(textarea);
         }
+        try {
+          const body = blank.querySelector('iframe')?.contentDocument?.body?.querySelector('p');
+          if (body) body.innerHTML = skjEscapeHtml(value);
+        } catch (e) {}
+      });
+      return true;
+    }
+
+    // 简答 / 名词解释 / 论述 / 计算 / 其他
+    const block = qEl.querySelector('.stem_answer') || qEl.querySelector('.Answer');
+    const value = String(answer).replace(/^#+|#+$/g, '').replace(/#+/g, ',');
+    let filled = false;
+    if (block) {
+      const textarea = block.querySelector('textarea');
+      if (textarea) {
+        textarea.value = value;
+        skjFireInput(textarea);
+        filled = true;
       }
-    } else if (questionType.includes('多选')) {
-      optEls.forEach((el) => {
-        const m = el.innerText.trim().match(/([A-Ha-h])/);
-        const letter = m ? m[1].toUpperCase() : '';
-        const icon = el.querySelector('.num_option_dx, .num_option');
-        const isSelected = icon?.classList.contains('check_answer') || icon?.classList.contains('check_answer_dx');
-        const shouldSelect = letter && answer.includes(letter);
-        if (shouldSelect !== isSelected) {
-          el.click();
+      try {
+        const body = block.querySelector('iframe')?.contentDocument?.body?.querySelector('p');
+        if (body) {
+          body.innerHTML = skjEscapeHtml(value);
+          filled = true;
         }
-      });
-    } else if (questionType.includes('判断')) {
-      const target = optEls.find((el) => {
-        const txt = el.innerText.trim();
-        return txt.includes(answer.charAt(0));
-      }) || optEls[0];
-      target?.click();
-    } else {
-      // 填空或简答
-      const textareas = Array.from(qEl.querySelectorAll('.Answer textarea, .stem_answer textarea'));
-      const parts = answer.split('#');
-      textareas.forEach((ta, idx) => {
-        const val = (parts[idx] || parts[0] || '').trim();
-        ta.value = val;
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-        ta.dispatchEvent(new Event('change', { bubbles: true }));
-      });
+      } catch (e) {}
+    }
+    return filled;
+  }
+
+  /** 作业/考试页 暂存 + 提交（含弹窗校验） */
+  async saveQuestionLiPage(config, failedCount = 0) {
+    try {
+      const tempSave = document.querySelector('#submitFocus a, .btnSave');
+      if (tempSave && (tempSave.innerText || '').includes('暂')) {
+        skjHumanClick(tempSave);
+        AppState.log('已点击【暂时保存】');
+      }
+      if (!config.autoSubmit) return;
+      if (failedCount > 0) {
+        AppState.log('存在未完成题目，已暂存答案，请手动核对后提交', 'warn');
+        return;
+      }
+      const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
+      if (!completeBtn) return;
+      skjHumanClick(completeBtn);
+      const popup = await skjWaitFor(() => this.findVisiblePopup(), { timeout: 8000, interval: 250 });
+      if (!popup) {
+        AppState.log('未检测到提交确认弹窗（可能已直接提交）', 'warn');
+        return;
+      }
+      const content = this.readPopupContent();
+      if (content.includes('未做完')) {
+        this.clickPopupButton([], '#popno, .popno');
+        AppState.log('平台提示仍有未作答题目，已取消提交（答案已暂存）', 'warn');
+        return;
+      }
+      if (content.includes('未达到及格线')) {
+        this.clickPopupButton([], '#popno, .popno');
+        AppState.log('平台提示未达到及格线，已取消提交（答案已暂存）', 'warn');
+        return;
+      }
+      this.clickPopupButton([], '#popok, .popBottom .confirm, .popok');
+      AppState.log('已自动确认提交作业/考试');
+    } catch (e) {
+      AppState.log('提交作业/考试异常: ' + e.message, 'error');
     }
   }
 
-  /**
-   * 解答智慧树作业/考试
-   */
+  /* =====================================================================
+   * 智慧树 作业 / 考试
+   * =================================================================== */
+
   async solveZhihuishuExamPage(config) {
-    const container = document.querySelector('.questionContent, .exam-test, .ET-content');
+    const container = document.querySelector('.examPaper_box, .questionContent, .exam-test, .ET-content');
     if (!container) return false;
 
-    AppState.log('检测到智慧树作业/考试页面');
-    const stem = container.querySelector('.questionTit, .subject-title')?.innerText || '';
-    const typeEl = container.querySelector('.questionType, .subject-type');
-    const questionType = typeEl ? typeEl.innerText.trim() : '单选题';
+    AppState.log('检测到智慧树作业/考试页面，开始 AI 作答...');
+    let items = Array.from(container.querySelectorAll('.subject_node'));
+    if (items.length <= 1) items = Array.from(container.querySelectorAll('.questionContent, .questionItem, .ET-item'));
+    if (!items.length) items = [container];
 
-    const optEls = Array.from(container.querySelectorAll('.optionItem, .el-radio, .el-checkbox, .answerBg'));
-    const options = optEls.map((el) => el.innerText.trim());
-
-    AppState.log(`[智慧树题目] ${questionType} - ${stem.slice(0, 30)}...`);
-
-    const prompt = buildQuestionPrompt(questionType, stem, options);
-    const aiResponse = await requestOpenAI(prompt, null, config);
-    const answer = parseAnswerFromLLM(questionType, aiResponse);
-    AppState.log(`AI 回答: ${answer}`);
-
-    // 智慧树填入选项
-    if (questionType.includes('单选') || questionType.includes('判断')) {
-      const target = optEls.find((el) => {
-        const txt = el.innerText.trim();
-        const m = txt.match(/([A-Ha-h])/);
-        return (m && m[1].toUpperCase() === answer) || txt.includes(answer.charAt(0));
-      });
-      target?.click();
-    } else if (questionType.includes('多选')) {
-      optEls.forEach((el) => {
-        const m = el.innerText.trim().match(/([A-Ha-h])/);
-        const letter = m ? m[1].toUpperCase() : '';
-        if (letter && answer.includes(letter)) {
-          el.click();
-        }
-      });
+    let ok = 0;
+    let failed = 0;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      AppState.setStatus(`正在解答智慧树题目 ${i + 1}/${items.length}...`);
+      try {
+        const stem = (
+          item.querySelector('.subject_type_describe, .questionTit, .subject-title, .questionTit')?.innerText ||
+          item.innerText ||
+          ''
+        )
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 800);
+        const typeRaw = item.querySelector('.subject_type span, .questionType, .subject-type')?.innerText || '';
+        const questionType = /多选/.test(typeRaw)
+          ? '多选题'
+          : /判断/.test(typeRaw)
+            ? '判断题'
+            : /填空/.test(typeRaw)
+              ? '填空题'
+              : /简答|论述|名词/.test(typeRaw)
+                ? '简答题'
+                : '单选题';
+        const optEls = Array.from(item.querySelectorAll('.nodeLab, .optionItem, .el-radio, .el-checkbox, .answerBg'));
+        const options = optEls.map((el) => el.innerText.trim());
+        const raw = await requestOpenAI(buildQuestionPrompt(questionType, stem, options), null, config);
+        const answer = parseAnswerFromLLM(questionType, raw);
+        AppState.log(`[智慧树 ${i + 1}/${items.length}] ${questionType} → ${answer}`);
+        const filled = this.fillZhsQuestion(item, questionType, answer, optEls);
+        if (filled) ok += 1;
+        else failed += 1;
+      } catch (err) {
+        failed += 1;
+        AppState.log(`[智慧树 ${i + 1}/${items.length}] 作答失败: ${err.message}`, 'error');
+      }
+      await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
     }
 
-    // 下一题按钮
-    await new Promise((r) => setTimeout(r, config.solveInterval || 2000));
-    const nextBtn = document.querySelector('.pre-next .next-t, .btn-next');
-    if (nextBtn && nextBtn.offsetParent !== null) {
-      nextBtn.click();
+    AppState.log(`智慧树作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
+    const nextBtn = document.querySelector('.pre-next .next-t, .btn-next, .nextBtn');
+    if (nextBtn && skjIsDisplayed(nextBtn)) {
+      skjHumanClick(nextBtn);
       AppState.log('已自动点击下一题');
     }
+    return true;
+  }
 
+  fillZhsQuestion(item, questionType, answer, optEls) {
+    const list = optEls && optEls.length ? optEls : [];
+    if (questionType === '多选题') {
+      let hit = false;
+      list.forEach((el) => {
+        const letter = skjLeadingLetter(el.innerText);
+        const input = el.querySelector('input');
+        const checked =
+          !!(input && input.checked) || el.classList.contains('active') || el.classList.contains('is-checked');
+        const should = !!letter && String(answer).includes(letter);
+        if (should) hit = true;
+        if (should !== checked) skjHumanClick(input || el);
+      });
+      return hit;
+    }
+    if (questionType === '填空题' || questionType === '简答题') {
+      const inputs = Array.from(item.querySelectorAll('textarea, input[type="text"]'));
+      if (!inputs.length) return false;
+      const parts = String(answer).split('#');
+      inputs.forEach((input, i) => {
+        input.value = (parts[i] || parts[0] || '').trim();
+        skjFireInput(input);
+      });
+      return true;
+    }
+    const target =
+      list.find((el) => skjOptionMatches(el.innerText, answer)) ||
+      list.find((el) => el.innerText.includes(String(answer).charAt(0))) ||
+      list[0];
+    if (!target) return false;
+    skjHumanClick(target.querySelector('input') || target);
     return true;
   }
 }

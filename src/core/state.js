@@ -18,7 +18,7 @@ const AppState = {
     const item = { time, msg, level };
     this.logs.push(item);
     if (this.logs.length > 80) this.logs.shift();
-    console.log(`[刷客酱][${time}] ${msg}`);
+    console.log(`[刷课酱][${time}] ${msg}`);
     this.notify();
   },
 

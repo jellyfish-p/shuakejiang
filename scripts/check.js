@@ -1,5 +1,5 @@
 /**
- * 刷客酱 - 质量与一致性检查脚本 (CI Test)
+ * 刷课酱 - 质量与一致性检查脚本 (CI Test)
  */
 
 const fs = require('fs');

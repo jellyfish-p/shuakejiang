@@ -1,14 +1,22 @@
 /* =========================================================================
- * 5. 视频助手核心实现 (自动播放、连播、倍速、防暂停、弹题)
+ * 5. 视频助手核心实现
+ *    - 超星/学习通：委托 CxCourseRunner 任务点队列（对齐参考扩展）
+ *    - 智慧树：小节列表驱动，优先跳转“未完成”视频
+ *    - 智慧职教 / 中国大学MOOC / 学堂在线：通用媒体接管 + 下一节
+ *    - 跨域子框架：仅接管本框架媒体并向顶层广播播放完成事件
  * ========================================================================= */
+
 class VideoAssistant {
   constructor() {
     this.timer = null;
-    this.lastVideo = null;
     this.active = false;
     this.examAssist = null;
-    this._lastCompleteHandled = false;
-    this._skipDebounce = false;
+    this.cxRunner = new CxCourseRunner(this);
+
+    this._jumpLock = 0;
+    this._msgBound = false;
+    this._zhsBridgeInjected = false;
+    this._zhsCompleted = false;
   }
 
   setExamAssistant(examAssist) {
@@ -16,706 +24,793 @@ class VideoAssistant {
   }
 
   start() {
+    if (this.active) return;
     this.active = true;
+    if (skjIsTopFrame()) this.bindCrossFrameMessages();
     this.loop();
   }
 
   stop() {
     this.active = false;
     if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** 页面切换或手动触发：强制重新识别任务点 */
+  kick() {
+    if (!this.active) {
+      this.start();
+      return;
+    }
+    this.cxRunner.reset();
+    this._zhsCompleted = false;
+    this._jumpLock = 0;
+    AppState.log('已重新识别当前页面任务点');
   }
 
   loop() {
     if (!this.active) return;
     const config = getConfig();
-
-    // 如果开启了“跳过已完成”与“自动下一节”，检查当前任务点是否已完成（适用于已完成的视频或小节）
-    if (config.skipFinished && config.autoNext && !this._skipDebounce) {
-      if (this.isTaskPointFinished()) {
-        this._skipDebounce = true;
-        AppState.log('检测到当前任务点已完成，自动跳过并进入下一节...');
-        setTimeout(() => {
-          this.triggerNextChapter();
-          setTimeout(() => {
-            this._skipDebounce = false;
-          }, 3000);
-        }, 1500);
-        this.timer = setTimeout(() => this.loop(), 2000);
-        return;
+    try {
+      if (skjIsTopFrame()) {
+        if (Site.isChaoxing) this.tickChaoxing(config);
+        else if (Site.isZhihuishu) this.tickZhihuishu(config);
+        else this.tickGeneric(config);
+      } else if (!skjCanReachTop()) {
+        this.tickIsolatedFrame(config);
       }
+    } catch (e) {
+      AppState.log('运行异常: ' + (e && e.message ? e.message : e), 'error');
     }
-
-    if (config.videoEnabled) {
-      this.processVideos(config);
-    }
-
-    // 如果当前没有正在播放的视频，且开启了解题助手，检查当前页面是否含有待解答的章节测验
-    if (config.examEnabled && this.examAssist && !this.examAssist.isBusy) {
-      this.checkAndSolveChapterQuiz(config);
-    }
-
     this.timer = setTimeout(() => this.loop(), 1500);
   }
 
-  /**
-   * 检查当前任务点（视频、章节测验或小节）是否已经完成
-   */
-  isTaskPointFinished(video = null) {
-    // 1. 超星/学习通
-    if (Site.isChaoxing) {
-      try {
-        // (A) 如果传入了具体 video 元素，检查其挂载 iframe 与父级容器
-        if (video) {
-          const frameEl = video.ownerDocument?.defaultView?.frameElement;
-          if (frameEl) {
-            const parent = frameEl.parentElement;
-            if (
-              parent?.classList?.contains('ans-job-finished') ||
-              frameEl.closest('.ans-job-finished') ||
-              parent?.querySelector('.ans-job-icon.ans-job-finished')
-            ) {
-              return true;
-            }
-          }
-          if (video.closest('.ans-job-finished')) {
-            return true;
-          }
-        }
+  /* ---------------------------------------------------------------------
+   * 平台分发
+   * ------------------------------------------------------------------- */
 
-        // (B) 遍历顶层窗口与子 iframe 容器检查
-        const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
-        const topIframe = topDoc.querySelector('#iframe');
-        if (topIframe?.contentDocument) {
-          // 1. 深度查找子 iframe 中的测验文档是否已完成
-          const innerIframe = topIframe.contentDocument.querySelector(
-            '#frame_content, iframe[src*="work"], iframe[src*="selectWorkQuestion"]'
-          );
-          const targetDoc = innerIframe?.contentDocument || topIframe.contentDocument;
-          if (this.isChapterQuizComplete(targetDoc)) {
-            return true;
-          }
-
-          // 2. 检查 #iframe 中的任务点卡片图标（真实 DOM 中标有“任务点已完成”）
-          const jobIcons = Array.from(
-            topIframe.contentDocument.querySelectorAll('.ans-job-icon, [class*="ans-job-icon"]')
-          );
-          const isIconFinished = jobIcons.some((icon) => {
-            const txt = (icon.innerText || icon.title || icon.getAttribute('aria-label') || '').trim();
-            return txt.includes('任务点已完成') || icon.classList.contains('ans-job-finished');
-          });
-          if (isIconFinished) {
-            return true;
-          }
-
-          const finishedJobs = Array.from(topIframe.contentDocument.querySelectorAll('.ans-job-finished'));
-          if (finishedJobs.length > 0) {
-            if (video) {
-              const fEl = video.ownerDocument?.defaultView?.frameElement;
-              if (finishedJobs.some((f) => f.contains(fEl))) {
-                return true;
-              }
-            } else {
-              // 如果当前文档下有完成的任务标记且页面内任务均已完成
-              const totalJobs = topIframe.contentDocument.querySelectorAll('.ans-attach-ct, .ans-job-icon');
-              if (totalJobs.length > 0 && finishedJobs.length >= totalJobs.length) {
-                return true;
-              }
-            }
-          }
-        }
-
-        // (C) 检查当前激活的标签卡 (#prev_tab .active)
-        const activeTab = topDoc.querySelector('#prev_tab .active, .prev_tab li.active');
-        if (activeTab) {
-          if (
-            activeTab.classList.contains('ans-job-finished') ||
-            activeTab.querySelector('.ans-job-finished, .icon-finish, .jobfinish, .prev_ul_icon_finish')
-          ) {
-            return true;
-          }
-        }
-      } catch (e) {}
-    }
-
-    // 2. 智慧树
-    if (Site.isZhihuishu) {
-      try {
-        const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
-        const activeVideo = topDoc.querySelector('.inner-li li.clearfix.video.activeNode');
-        if (activeVideo) {
-          if (
-            activeVideo.classList.contains('time_icofinish') ||
-            activeVideo.querySelector('.time_icofinish, .finish-icon, .icon-finish')
-          ) {
-            return true;
-          }
-        }
-        const activeRes = topDoc.querySelector('.resources-list .resources-item.active');
-        if (activeRes) {
-          if (activeRes.querySelector('.time_icofinish, .finish-icon, .icon-finish')) {
-            return true;
-          }
-        }
-      } catch (e) {}
-    }
-
-    // 3. 智慧职教 (ICVE)
-    if (Site.isIcve) {
-      try {
-        const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
-        const activeNode = topDoc.querySelector('.panelList .node.active');
-        if (activeNode && (activeNode.classList.contains('is-finish') || activeNode.querySelector('.icon-finish, .finish'))) {
-          return true;
-        }
-      } catch (e) {}
-    }
-
-    // 4. 中国大学 MOOC
-    if (Site.isMooc) {
-      try {
-        const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
-        const activeLesson = topDoc.querySelector('.j-item.active, .lesson-item.active');
-        if (activeLesson && activeLesson.querySelector('.u-icon-finish, .j-icon-finish')) {
-          return true;
-        }
-      } catch (e) {}
-    }
-
-    return false;
-  }
-
-  /**
-   * 检查超星章节测验是否已作答、已交卷或已完成
-   */
-  isChapterQuizComplete(targetDoc) {
-    if (!targetDoc) return false;
-    try {
-      // 0. 真实 DOM 核心特征：页面标题或根文档标识为“查看已批阅作业”
-      if (
-        targetDoc.title?.includes('查看已批阅作业') ||
-        targetDoc.title?.includes('查看作业') ||
-        targetDoc.body?.innerText?.includes('查看已批阅作业') ||
-        targetDoc.querySelector('h1, h2, .head_tit')?.innerText?.includes('查看已批阅作业')
-      ) {
-        return true;
-      }
-
-      // 1. 测验头部状态标记
-      const statusEl = targetDoc.querySelector('.testTit_status, .ceyan_status, .status, .test-status');
-      if (statusEl) {
-        const txt = statusEl.innerText.trim();
-        if (
-          statusEl.classList.contains('testTit_status_complete') ||
-          statusEl.classList.contains('complete') ||
-          /已完成|已提交|待批阅|已批阅|已作答|合格|通过/.test(txt)
-        ) {
-          return true;
-        }
-      }
-
-      // 2. 底部操作栏/提交按钮文本判定
-      const subEl = targetDoc.querySelector('.Zy_sub, .subBox, .ZY_sub');
-      if (subEl) {
-        const subTxt = subEl.innerText.trim();
-        if (/已完成|已提交|查看解析|重做|重新作答/.test(subTxt)) {
-          return true;
-        }
-      }
-
-      // 3. 判分/批阅/解析标记 (出现说明已交卷或已批改)
-      if (
-        targetDoc.querySelector(
-          '.mark_score, .py_content, .analysis, .marking, .correctAnswer, .marking_content, .myAnswer, .ans-mark, .ceyanAiAssistant'
-        )
-      ) {
-        return true;
-      }
-
-      // 4. 页面关键文本判定
-      const bodyText = targetDoc.body ? targetDoc.body.innerText : '';
-      if (/待批阅|已批阅|本次成绩|本次得分|您的得分|最终成绩|测试已完成|测验已提交|您已提交/.test(bodyText)) {
-        return true;
-      }
-
-      // 5. 检查父级 iframe 关联的任务点卡片是否已有完成绿标或已完成文字
-      const frameEl = targetDoc.defaultView?.frameElement;
-      if (frameEl) {
-        const jobBox = frameEl.closest('.ans-job-finished, .ans-attach-ct, .editor-iframe');
-        if (
-          jobBox?.classList.contains('ans-job-finished') ||
-          jobBox?.querySelector('.ans-job-icon.ans-job-finished') ||
-          jobBox?.querySelector('.ans-job-icon')?.innerText?.includes('任务点已完成')
-        ) {
-          return true;
-        }
-      }
-
-      // 6. 若存在题目列表，但已无保存/提交按钮且存在选项被选中或查看状态
-      const questions = targetDoc.querySelectorAll('#ZyBottom .singleQuesId, .singleQuesId');
-      const hasSubmitBtn = targetDoc.querySelector('.btnSubmit, .btnSave, input[type="submit"], #workpop');
-      if (questions.length > 0 && !hasSubmitBtn) {
-        return true;
-      }
-    } catch (e) {}
-    return false;
-  }
-
-  /**
-   * 自动检测并解答超星章节测验
-   */
-  checkAndSolveChapterQuiz(config) {
-    if (!Site.isChaoxing) return;
-
-    // 如果当前页面有视频正在播放，优先等待视频播完
-    const videos = this.findMediaElements();
-    const hasPlayingVideo = videos.some((v) => !v.paused && !v.ended && v.currentTime > 0);
-    if (hasPlayingVideo) return;
-
-    try {
-      const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
-      const topIframe = topDoc.querySelector('#iframe');
-      if (!topIframe) return;
-
-      const doc1 = topIframe.contentDocument;
-      const innerIframe = doc1?.querySelector('#frame_content');
-      const targetDoc = innerIframe?.contentDocument || doc1;
-      if (!targetDoc) return;
-
-      // 检查当前测验是否已经做完/已提交/已完成
-      if (this.isChapterQuizComplete(targetDoc)) {
-        if (!this._lastCompleteHandled && config.autoNext) {
-          this._lastCompleteHandled = true;
-          AppState.log('检测到当前章节测验已做完/已完成，准备跳转下一节...');
-          setTimeout(() => this.triggerNextChapter(), 2000);
-        }
-        return;
-      }
-
-      // 检查是否有题目且尚未在作答
-      const questions = targetDoc.querySelectorAll('#ZyBottom .singleQuesId');
-      if (questions.length > 0) {
-        // 未配置 AI 接口时：无需请求 AI，题目由用户完成或已作答后自动跳过
-        if (!config.openaiApiKey) {
-          return;
-        }
-
-        if (!targetDoc._skj_solving) {
-          targetDoc._skj_solving = true;
-          AppState.log(`自动检测到当前任务点为章节测验 (共 ${questions.length} 题)，启动 AI 求解...`);
-          this.examAssist.solveCurrentPage(false).finally(() => {
-            setTimeout(() => {
-              targetDoc._skj_solving = false;
-            }, 5000);
-          });
-        }
-      }
-    } catch (e) {}
-  }
-
-  /**
-   * 递归检索当前页面以及同源 iframe 中的所有视频与弹题
-   */
-  findMediaElements(root = document) {
-    let videos = Array.from(root.querySelectorAll('video'));
-    // 深度穿透检索同源 iframe
-    const iframes = Array.from(root.querySelectorAll('iframe'));
-    for (const ifr of iframes) {
-      try {
-        const win = ifr.contentWindow;
-        if (win) {
-          hookMediaWindow(win);
-        }
-        const doc = ifr.contentDocument || win?.document;
-        if (doc) {
-          videos = videos.concat(this.findMediaElements(doc));
-        }
-      } catch (e) {
-        // 跨域 iframe 忽略
-      }
-    }
-    return videos;
-  }
-
-  processVideos(config) {
-    const videos = this.findMediaElements();
-
-    for (const video of videos) {
-      this.handleSingleVideo(video, config);
-    }
-
-    // 处理可能出现的暂停弹窗与人机验证掩码
-    this.handlePauseArtifacts();
-
-    // 处理视频随堂测验 (弹题)
-    if (config.autoSolveVideoQuiz) {
-      this.handleVideoQuizzes(config);
-    }
-  }
-
-  handleSingleVideo(video, config) {
-    if (!video) return;
-
-    // 0. 优先检查当前视频任务点是否已完成，若已完成则直接跳过，不播放
-    if (config.skipFinished && this.isTaskPointFinished(video)) {
-      if (!video._skj_skip_handled) {
-        video._skj_skip_handled = true;
-        try {
-          video.pause();
-        } catch (e) {}
-        AppState.log('检测到当前任务点视频已完成，自动跳过并进入下一节...');
-        if (config.autoNext) {
-          setTimeout(() => this.triggerNextChapter(), 1500);
-        }
-      }
+  tickChaoxing(config) {
+    if (Site.isCxStudentStudy) {
+      if (!config.videoEnabled && !config.examEnabled) return;
+      this.cxRunner.tick(config).catch((e) => {
+        AppState.log('任务点执行异常: ' + (e && e.message ? e.message : e), 'error');
+      });
       return;
     }
+    if (Site.isCxWorkOrExam) return; // 独立作业/考试页由 ExamAssistant 处理
+    this.tickGeneric(config);
+  }
 
-    // 1. 设置静音以规避现代浏览器的自动播放限制
-    if (config.muted && !video.muted) {
-      video.muted = true;
+  tickZhihuishu(config) {
+    if (config.videoEnabled) this.processMedia(document, config, { autoJump: false });
+    if (config.autoSolveVideoQuiz) this.zhsSolvePopupQuiz(config);
+    this.handlePauseArtifacts(document);
+
+    if (!config.videoEnabled || !config.autoNext) return;
+    if (this._zhsCompleted) return;
+    if (Date.now() < this._jumpLock) return;
+
+    const sections = this.zhsSections();
+    if (!sections.length) return;
+    const active = this.zhsActiveSection(sections);
+    if (!active) return;
+
+    const media = this.zhsCurrentVideo();
+    const ended = media ? CxDom.isMediaFinished(media) : false;
+    const done = this.zhsIsSectionDone(active) && config.skipFinished;
+    if (!ended && !done) return;
+
+    AppState.log(ended ? '当前视频已播放完毕' : '当前小节已完成');
+    this.zhsNavigateNext(sections, active, config);
+  }
+
+  tickGeneric(config) {
+    if (config.videoEnabled) this.processMedia(document, config, { autoJump: true });
+    this.handlePauseArtifacts(document);
+  }
+
+  tickIsolatedFrame(config) {
+    if (!config.videoEnabled) return;
+    this.processMedia(document, config, { autoJump: false, notifyTop: true });
+    this.handlePauseArtifacts(document);
+  }
+
+  bindCrossFrameMessages() {
+    if (this._msgBound) return;
+    this._msgBound = true;
+    window.addEventListener('message', (event) => {
+      const data = event && event.data;
+      if (!data || data.type !== 'skj:media-ended') return;
+      const config = getConfig();
+      if (!config.videoEnabled || !config.autoNext) return;
+      AppState.log('子框架视频播放完成，准备跳转下一节...');
+      setTimeout(() => this.genericNavigateNext(getConfig()), 2000);
+    });
+  }
+
+  /* ---------------------------------------------------------------------
+   * 通用媒体接管
+   * ------------------------------------------------------------------- */
+
+  findMediaElements(root = document, seen = null) {
+    const visited = seen || new Set();
+    if (!root || visited.has(root)) return [];
+    visited.add(root);
+    let medias = [];
+    try {
+      medias = Array.from(root.querySelectorAll('video, audio'));
+    } catch (e) {
+      return [];
     }
-
-    // 2. 强制设置播放倍速 (多层突破防倍速限制)
-    const targetRate = Number(config.playbackRate) || 1.0;
-    this.applyPlaybackRate(video, targetRate);
-
-    // 3. 自动播放与防暂停
-    if (config.autoPlay && video.paused && !video.ended) {
-      video.play().catch((e) => {
-        // 如果受限，确保静音再重试
-        video.muted = true;
-        video.play().catch(() => {});
-      });
-      AppState.isPlayingVideo = true;
-      AppState.setStatus(`正在播放视频 (${targetRate}x)`);
-    }
-
-    // 4. 监听播放完毕事件 (绑定一次)
-    if (!video._skj_bound) {
-      video._skj_bound = true;
-      video.addEventListener('ended', () => {
-        AppState.log('当前视频播放完成！');
-        if (config.autoNext) {
-          AppState.log('准备自动跳转下一节...');
-          setTimeout(() => this.triggerNextChapter(), 2000);
-        }
-      });
-    }
-
-    // 兜底时间监测：部分平台的视频 ended 事件被篡改或不触发
-    if (video.duration > 0 && video.currentTime >= video.duration - 0.8 && !video._skj_ended_handled) {
-      video._skj_ended_handled = true;
-      AppState.log('检测到视频播放至末尾！');
-      if (config.autoNext) {
-        setTimeout(() => this.triggerNextChapter(), 2000);
+    let frames = [];
+    try {
+      frames = Array.from(root.querySelectorAll('iframe, frame'));
+    } catch (e) {}
+    for (const fr of frames) {
+      try {
+        const win = fr.contentWindow;
+        if (win) hookMediaWindow(win);
+        const doc = fr.contentDocument || (win && win.document);
+        if (doc) medias = medias.concat(this.findMediaElements(doc, visited));
+      } catch (e) {
+        // 跨域框架忽略
       }
+    }
+    return medias;
+  }
+
+  processMedia(root, config, options = {}) {
+    const medias = this.findMediaElements(root);
+    medias.forEach((media) => this.handleSingleMedia(media, config, options));
+  }
+
+  handleSingleMedia(media, config, options = {}) {
+    if (!media) return;
+
+    try {
+      if (config.muted && !media.muted) media.muted = true;
+    } catch (e) {}
+    this.applyPlaybackRate(media, config.playbackRate);
+
+    if (config.autoPlay && media.paused && !media.ended) {
+      try {
+        const p = media.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            try {
+              media.muted = true;
+              media.play().catch(() => {});
+            } catch (e) {}
+          });
+        }
+      } catch (e) {}
+    }
+
+    if (!media.dataset.skjEndedBound) {
+      media.dataset.skjEndedBound = '1';
+      media.addEventListener('ended', () => {
+        media.dataset.skjEnded = '1';
+        if (options.notifyTop) {
+          this.notifyTopFrameMediaEnded();
+          return;
+        }
+        if (!options.autoJump) return;
+        // 实时读取最新配置，避免绑定时的旧值导致行为不一致
+        const fresh = getConfig();
+        if (!fresh.videoEnabled || !fresh.autoNext) return;
+        AppState.log('当前视频播放完成，准备跳转下一节...');
+        setTimeout(() => this.genericNavigateNext(getConfig()), 2500);
+      });
+    }
+
+    // 兜底：部分平台 ended 事件被篡改，用进度判定
+    if (options.autoJump && config.autoNext && !media.dataset.skjEnded && CxDom.isMediaFinished(media)) {
+      media.dataset.skjEnded = '1';
+      AppState.log('检测到视频播放至末尾，准备跳转下一节...');
+      setTimeout(() => this.genericNavigateNext(getConfig()), 2500);
+    } else if (options.notifyTop && !media.dataset.skjEnded && CxDom.isMediaFinished(media)) {
+      media.dataset.skjEnded = '1';
+      this.notifyTopFrameMediaEnded();
     }
   }
 
+  notifyTopFrameMediaEnded() {
+    try {
+      const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+      win.top.postMessage({ type: 'skj:media-ended', href: location.href }, '*');
+    } catch (e) {}
+  }
+
   /**
-   * 安全并强制设置视频播放倍速 (突破超星/学习通防倍速限制)
+   * 强制设置播放倍速（突破超星/学习通防倍速限制）
    */
-  applyPlaybackRate(video, targetRate) {
-    if (!video) return;
-    targetRate = Number(targetRate) || 1.0;
+  applyPlaybackRate(media, targetRate) {
+    if (!media) return;
+    const rate = Number(targetRate) || 1.0;
+    let win = window;
+    try {
+      win = media.ownerDocument?.defaultView || window;
+    } catch (e) {}
+    try {
+      hookMediaWindow(win);
+    } catch (e) {}
 
-    // 确保该 video 所在的 window 原型链已被 Hook
-    const ifrWin = video.ownerDocument?.defaultView || window;
-    hookMediaWindow(ifrWin);
+    if (Math.abs(Number(media._skj_real_rate || 1.0) - rate) <= 0.05) return;
 
-    // 捕获阶段拦截 ratechange 事件，阻断事件向后传播
-    if (!video._skj_ratechange_captured) {
-      video._skj_ratechange_captured = true;
-      video.addEventListener(
-        'ratechange',
-        (e) => {
-          e.stopImmediatePropagation();
-        },
-        true
-      );
+    let nativeDesc = null;
+    try {
+      if (typeof unsafeWindow !== 'undefined' && unsafeWindow._skj_native_rate_desc) {
+        nativeDesc = unsafeWindow._skj_native_rate_desc;
+      }
+    } catch (e) {}
+    if (!nativeDesc) {
+      try {
+        nativeDesc = win._skj_native_rate_desc;
+      } catch (e) {}
+    }
+    if (!nativeDesc) {
+      try {
+        nativeDesc = Object.getOwnPropertyDescriptor(win.HTMLMediaElement.prototype, 'playbackRate');
+      } catch (e) {}
     }
 
-    // 仅在真实倍速未同步时执行原生赋值
-    if (Math.abs((video._skj_real_rate || 1.0) - targetRate) > 0.05) {
-      const nativeDesc =
-        ifrWin._skj_native_rate_desc ||
-        Object.getOwnPropertyDescriptor(ifrWin.HTMLMediaElement.prototype, 'playbackRate');
-
-      if (nativeDesc && nativeDesc.set) {
-        video._skj_setting_real_rate = true;
-        try {
-          nativeDesc.set.call(video, targetRate);
-          video._skj_real_rate = targetRate;
-          AppState.log(`已将视频播放倍速设置为: ${targetRate}x`);
-        } catch (e) {
-          video.playbackRate = targetRate;
-          video._skj_real_rate = targetRate;
-        } finally {
-          video._skj_setting_real_rate = false;
-        }
-      } else {
-        video._skj_setting_real_rate = true;
-        try {
-          video.playbackRate = targetRate;
-          video._skj_real_rate = targetRate;
-          AppState.log(`已将视频播放倍速设置为: ${targetRate}x`);
-        } finally {
-          video._skj_setting_real_rate = false;
-        }
-      }
+    media._skj_setting_real_rate = true;
+    try {
+      if (nativeDesc && nativeDesc.set) nativeDesc.set.call(media, rate);
+      else media.playbackRate = rate;
+      media._skj_real_rate = rate;
+      skjLogOnce('rate-' + rate, `已开启 ${rate}x 倍速播放`);
+    } catch (e) {
+      try {
+        media.playbackRate = rate;
+        media._skj_real_rate = rate;
+      } catch (e2) {}
+    } finally {
+      media._skj_setting_real_rate = false;
     }
 
     // 适配超星内部 Video.js 播放器实例
-    if (ifrWin.videojs) {
-      try {
-        const players = ifrWin.videojs.players || {};
-        const p = players[video.id] || (typeof ifrWin.videojs === 'function' ? ifrWin.videojs(video) : null);
+    try {
+      const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : win;
+      if (pageWin && pageWin.videojs) {
+        const players = pageWin.videojs.players || {};
+        const p =
+          players[media.id] || (typeof pageWin.videojs === 'function' ? pageWin.videojs(media) : null);
         if (p) {
-          // 解锁超星 studyControl 限制 (允许快进与切换窗口)
           if (p.studyControl) {
             p.studyControl.enableSwitchWindow = 1;
             p.studyControl.enableFastForward = 1;
           }
-          if (typeof p.playbackRate === 'function' && Math.abs((p.playbackRate() || 1.0) - targetRate) > 0.05) {
+          if (typeof p.playbackRate === 'function' && Math.abs((p.playbackRate() || 1.0) - rate) > 0.05) {
             try {
-              p.playbackRate(targetRate);
+              p.playbackRate(rate);
             } catch (e) {}
           }
         }
-      } catch (e) {}
-    }
-  }
-
-  /**
-   * 处理暂停时的遮罩层、批注、继续播放提示
-   */
-  handlePauseArtifacts() {
-    try {
-      // 超星播放器暂停遮罩与继续学习按钮
-      const resumeBtns = document.querySelectorAll('.sp_video_pic a.jb_btn, .ans-videoannotation .continueLearn');
-      resumeBtns.forEach((btn) => {
-        if (btn && btn.offsetParent !== null) {
-          btn.removeAttribute('href');
-          btn.click();
-          AppState.log('已自动点击解除超星视频暂停遮罩');
-        }
-      });
-
-      // 智慧树课程提醒弹窗
-      const zhsPopClose = document.querySelector('.courseRemind.khfaPop .el-icon-error');
-      if (zhsPopClose && zhsPopClose.offsetParent !== null) {
-        zhsPopClose.click();
-        AppState.log('已自动关闭智慧树弹窗提醒');
       }
     } catch (e) {}
   }
 
-  /**
-   * 处理视频内弹出测验 (弹题)
-   */
-  async handleVideoQuizzes(config) {
-    // 1. 智慧树视频弹题 (#playTopic-dialog)
-    const zhsDialog = document.querySelector('#playTopic-dialog');
-    if (zhsDialog && zhsDialog.offsetParent !== null) {
-      try {
-        const vue = zhsDialog.__vue__?.$parent?.$parent;
-        const topicInfo = vue?.topicInfo?.lessonTestQuestionUseInterfaceDtos?.[0];
-        const options = topicInfo?.testQuestion?.questionOptions;
-        const answers = topicInfo?.answerUs; // 智慧树前端直接暴露了正确答案 answerUs！
-
-        if (vue && options && answers && typeof vue.topicClickQot === 'function') {
-          const matches = options.filter((o) => o.sortUs && answers.includes(o.sortUs));
-          for (const opt of matches) {
-            vue.topicClickQot(opt);
-            await new Promise((r) => setTimeout(r, 400));
+  /** 解除超星暂停遮罩 / 批注拦截 / 智慧树提醒弹窗（对齐参考扩展 handleVideoPauseArtifactsInIframe） */
+  handlePauseArtifacts(root = document) {
+    try {
+      for (const doc of skjCollectDocs(root)) {
+        const containers = Array.from(doc.querySelectorAll('.x-container-default'));
+        const scopes = containers.length ? containers : [doc];
+        for (const scope of scopes) {
+          const pic = scope.querySelector('.sp_video_pic');
+          if (pic) {
+            const btn = pic.querySelector('a.jb_btn.jb_btn_92');
+            if (btn && skjIsDisplayed(btn)) {
+              skjHumanClick(btn);
+              skjLogOnce('cx-resume-artifact', '已自动点击解除视频暂停遮罩');
+              continue;
+            }
           }
-          setTimeout(() => {
-            vue.testDialog = false;
-            AppState.log('智慧树视频弹题已秒解并自动跳过！');
-          }, 600);
-          return;
+          const anno = scope.querySelector('.ans-videoannotation');
+          if (anno) {
+            const title = anno.querySelector('.comment_tit')?.innerText || '';
+            if (title.includes('批注')) {
+              const btn = anno.querySelector('.continueLearn');
+              if (btn && skjIsDisplayed(btn)) {
+                skjHumanClick(btn);
+                skjLogOnce('cx-continue-learn', '已自动跳过超星批注拦截，继续播放');
+              }
+            }
+          }
         }
-      } catch (e) {
-        console.warn('[刷客酱] 智慧树原生弹题处理异常，尝试通用方式:', e);
+
+        const zhsPopClose = doc.querySelector(
+          '.courseRemind.khfaPop .el-icon-error, .courseRemind .el-icon-close, .courseRemind .close'
+        );
+        if (zhsPopClose && skjIsDeepVisible(zhsPopClose)) {
+          skjHumanClick(zhsPopClose);
+          skjLogOnce('zhs-course-remind', '已自动关闭智慧树弹窗提醒');
+        }
       }
+    } catch (e) {}
+  }
+
+  /* ---------------------------------------------------------------------
+   * 超星视频随堂弹题（弹题）
+   * ------------------------------------------------------------------- */
+
+  async cxSolveVideoQuiz(taskIframe, config, attempt = 0) {
+    let doc = null;
+    try {
+      doc = taskIframe.contentDocument;
+    } catch (e) {}
+    if (!doc) return 'none';
+
+    const box = doc.querySelector('.ans-videoquiz');
+    if (!box || !skjIsDeepVisible(box)) return 'none';
+
+    const readBtn = (id) => doc.getElementById(id);
+    const submitBtn = readBtn('videoquiz-submit');
+    const continueBtn = readBtn('videoquiz-continue');
+    const backBtn = readBtn('knowledgeBack');
+
+    // 已经通过（出现继续/返回按钮）→ 点击恢复播放
+    if (continueBtn && skjIsDisplayed(continueBtn)) {
+      skjHumanClick(continueBtn);
+      return 'resolved';
+    }
+    if (backBtn && skjIsDisplayed(backBtn)) {
+      skjHumanClick(backBtn);
+      return 'resolved';
+    }
+    if (box.dataset.skjSolving === '1') return 'busy';
+
+    if (!String(config.openaiApiKey || '').trim()) {
+      skjLogOnce('video-quiz-nokey', '检测到视频随堂弹题，但未配置 API Key，请手动作答', 'warn');
+      return 'nokey';
     }
 
-    // 2. 超星视频弹题 (.ans-videoquiz)
-    // 遍历所有 iframe 查找
-    const frames = [document, ...Array.from(document.querySelectorAll('iframe')).map((f) => f.contentDocument).filter(Boolean)];
-    for (const doc of frames) {
-      const quizBox = doc.querySelector('.ans-videoquiz');
-      if (quizBox && quizBox.offsetParent !== null && !quizBox._skj_solving) {
-        quizBox._skj_solving = true;
-        AppState.log('检测到超星视频随堂弹题，启动 AI 求解...');
+    box.dataset.skjSolving = '1';
+    try {
+      const typeTitle = doc.querySelector('.tkTopic_title')?.innerText || '';
+      const questionType = /多选/.test(typeTitle)
+        ? '多选题'
+        : /判断/.test(typeTitle)
+          ? '判断题'
+          : '单选题';
+      const stem = (doc.querySelector('.ans-videoquiz .tkTopic')?.innerText || box.innerText || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const optEls = Array.from(doc.querySelectorAll('.ans-videoquiz-opt'));
+      const options = optEls.map((el) => el.innerText.trim());
+      if (!optEls.length) return 'none';
+
+      let prompt = buildQuestionPrompt(questionType, stem, options);
+      if (attempt > 0) {
+        prompt += '\n【注意】上一次提交的答案被平台判定为错误，请重新仔细分析题目，务必给出正确的答案！';
+      }
+      const raw = await requestOpenAI(prompt, null, config);
+      const answer = parseAnswerFromLLM(questionType, raw);
+      AppState.log(`视频随堂弹题（${questionType}）AI 答案：${answer}`);
+
+      if (questionType === '多选题') {
+        optEls.forEach((el) => {
+          const letter = skjLeadingLetter(el.innerText);
+          const input = el.querySelector('input');
+          const checked = !!(input && input.checked);
+          const should = !!letter && String(answer).includes(letter);
+          if (should !== checked) skjHumanClick(input || el);
+        });
+      } else {
+        const target =
+          optEls.find((el) => skjOptionMatches(el.innerText, answer)) || optEls[0];
+        const input = target?.querySelector('input');
+        if (input && !input.checked) skjHumanClick(input);
+        else if (target) skjHumanClick(target);
+      }
+
+      await skjSleep(800);
+      const freshSubmit = doc.getElementById('videoquiz-submit');
+      if (freshSubmit && skjIsDisplayed(freshSubmit)) skjHumanClick(freshSubmit);
+      await skjSleep(2000);
+
+      // 与参考扩展一致：用 #spanNot / #spanNotBackPoint 判定答案是否错误
+      const continueBtn2 = doc.getElementById('videoquiz-continue');
+      const backBtn2 = doc.getElementById('knowledgeBack');
+      const submitBtn2 = doc.getElementById('videoquiz-submit');
+      const notBack = doc.getElementById('spanNotBackPoint');
+      const notOk = doc.getElementById('spanNot');
+      const wrongVisible =
+        (!!notBack && skjDisplayOf(notBack) === 'block') || (!!notOk && skjDisplayOf(notOk) === 'block');
+
+      if (continueBtn2 && skjIsDisplayed(continueBtn2)) {
+        skjHumanClick(continueBtn2);
+        AppState.log('视频随堂弹题已通过，继续播放');
+        return 'resolved';
+      }
+      if (wrongVisible && submitBtn2 && skjIsDisplayed(submitBtn2)) return 'retry';
+      if (wrongVisible && backBtn2 && skjIsDisplayed(backBtn2)) {
+        skjHumanClick(backBtn2);
+        AppState.log('视频随堂弹题已通过，继续播放');
+        return 'resolved';
+      }
+      AppState.log('视频随堂弹题已提交');
+      return 'resolved';
+    } catch (e) {
+      AppState.log('视频随堂弹题求解失败: ' + (e && e.message ? e.message : e), 'error');
+      return 'failed';
+    } finally {
+      setTimeout(() => {
         try {
-          const stem = doc.querySelector('.ans-videoquiz .tkTopic')?.innerText || '';
-          const opts = Array.from(doc.querySelectorAll('.ans-videoquiz-opt')).map((el) => el.innerText.trim());
-          const prompt = buildQuestionPrompt('单选题', stem, opts);
-
-          const aiAns = await requestOpenAI(prompt, null, config);
-          const choice = parseAnswerFromLLM('单选题', aiAns);
-          AppState.log(`AI 弹题回答: ${choice}`);
-
-          // 查找对应选项并点击
-          const optEls = Array.from(doc.querySelectorAll('.ans-videoquiz-opt'));
-          const target = optEls.find((el) => {
-            const m = el.innerText.trim().match(/([A-Ha-h])/);
-            return m && m[1].toUpperCase() === choice;
-          }) || optEls[0];
-
-          if (target) {
-            target.querySelector('input')?.click() || target.click();
-            await new Promise((r) => setTimeout(r, 600));
-            doc.querySelector('#videoquiz-submit')?.click();
-            AppState.log('视频弹题已自动提交！');
-          }
-        } catch (err) {
-          AppState.log('视频弹题求解失败: ' + err.message, 'error');
-          // 失败时点第一个以尝试继续
-          doc.querySelector('.ans-videoquiz-opt input')?.click();
-          doc.querySelector('#videoquiz-submit')?.click();
-        } finally {
-          setTimeout(() => {
-            doc.querySelector('#videoquiz-continue, #knowledgeBack')?.click();
-            quizBox._skj_solving = false;
-          }, 1200);
-        }
-      }
+          box.dataset.skjSolving = '';
+        } catch (e) {}
+      }, 3000);
     }
   }
 
-  /**
-   * 自动跳转下一节 / 下一章
-   */
-  triggerNextChapter() {
-    // 获取跨越 iframe 的顶层 document
-    const topDoc = typeof window !== 'undefined' && window.top && window.top.document ? window.top.document : document;
-    this._lastCompleteHandled = false;
-    this._skipDebounce = false;
+  /* ---------------------------------------------------------------------
+   * 智慧树
+   * ------------------------------------------------------------------- */
 
-    // 1. 超星/学习通
-    if (Site.isChaoxing) {
-      // 查找章节顶部的标签卡（同一个小节可能含有视频、文档、作业等多个tab）
-      const activeTab = topDoc.querySelector('#prev_tab .active, .prev_tab li.active');
-      const allTabs = Array.from(topDoc.querySelectorAll('#prev_tab li, .prev_tab li'));
-      if (activeTab && allTabs.length > 1) {
-        const nextIdx = allTabs.indexOf(activeTab) + 1;
-        if (nextIdx < allTabs.length) {
-          AppState.log(`切换到当前章节的下一个标签卡 (${nextIdx + 1}/${allTabs.length})...`);
-          allTabs[nextIdx].click();
-          allTabs[nextIdx].querySelector('a')?.click();
-          return;
-        }
-      }
-
-      // 尝试让底部导航区域滚入视野（触发超星懒加载或检测）
-      try {
-        topDoc.querySelector('#prevNextFocus')?.scrollIntoView();
-      } catch (e) {}
-
-      // 点击页面底部的 "下一节" 按钮
-      const nextBtn = topDoc.querySelector(
-        '#prevNextFocusNext, .nextChapter, .next-node, #prevNextFocus .nextChapter, .orientationright'
+  zhsSections() {
+    try {
+      const modern = Array.from(document.querySelectorAll('li.video'));
+      if (modern.length) return modern;
+      return Array.from(
+        document.querySelectorAll('.inner-li li.clearfix.video, .resources-list .resources-item')
       );
-      if (nextBtn && window.getComputedStyle(nextBtn).display !== 'none') {
-        AppState.log('点击超星【下一节】按钮');
-        nextBtn.removeAttribute('href');
-        nextBtn.click();
-        this.handleJobFinishTips(topDoc);
-        return;
-      }
+    } catch (e) {
+      return [];
+    }
+  }
 
-      // 尝试目录中的下一个节点 (支持新版 .posCatalog_name 节点与传统 a 链接)
-      const currentCatalog = topDoc.querySelector('.posCatalog_select, .leveltwo.active, .posCatalog_active');
-      if (currentCatalog) {
-        let nextNode = currentCatalog.nextElementSibling;
-        while (nextNode && !nextNode.querySelector('.posCatalog_name, a') && nextNode.tagName !== 'A' && !nextNode.classList.contains('posCatalog_name')) {
-          nextNode = nextNode.nextElementSibling;
-        }
-        const target = nextNode?.querySelector('.posCatalog_name, a, span') || (nextNode?.tagName === 'A' ? nextNode : null);
-        if (target) {
-          AppState.log('跳转至目录中的下一节课程');
-          target.click();
-          this.handleJobFinishTips(topDoc);
-          return;
-        }
-      }
+  zhsActiveSection(sections) {
+    const list = sections || this.zhsSections();
+    return (
+      list.find(
+        (el) =>
+          el.classList.contains('current_play') ||
+          el.classList.contains('activeNode') ||
+          el.classList.contains('active')
+      ) || null
+    );
+  }
+
+  zhsSectionKey(el) {
+    if (!el) return '';
+    return (
+      el.getAttribute('data-id') ||
+      el.getAttribute('data-video-id') ||
+      el.getAttribute('data-file-id') ||
+      el.id ||
+      el.querySelector('.catalogue_title')?.innerText?.trim() ||
+      ''
+    );
+  }
+
+  zhsIsSectionDone(el) {
+    try {
+      return !!el.querySelector('.time_icofinish, .finish-icon, .icon-finish');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 优先返回后续“未完成”的小节（对齐参考扩展 findNextSectionElement） */
+  zhsFindNext(sections, fromIndex, preferUnfinished) {
+    const rest = sections.slice(fromIndex + 1);
+    if (!rest.length) return null;
+    if (preferUnfinished) return rest.find((el) => !this.zhsIsSectionDone(el)) || null;
+    return rest[0] || null;
+  }
+
+  zhsCurrentVideo() {
+    try {
+      return document.querySelector('#vjs_container_html5_api') || document.querySelector('video');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  zhsNavigateNext(sections, active, config) {
+    if (Date.now() < this._jumpLock) return;
+    const list = sections || this.zhsSections();
+    const current = active || this.zhsActiveSection(list);
+    const idx = current ? list.indexOf(current) : -1;
+    if (idx < 0) return;
+
+    const next = this.zhsFindNext(list, idx, !!config.skipFinished);
+    if (!next) {
+      this._zhsCompleted = true;
+      this.markCourseComplete('智慧树');
+      return;
     }
 
-    // 2. 智慧树
+    AppState.log(`切换至智慧树下一个未完成小节（第 ${list.indexOf(next) + 1} 个）`);
+    skjHumanClick(next);
+    this._jumpLock = Date.now() + 6000;
+
+    // 与参考扩展一致：3 秒后若仍未切换成功则重试一次
+    const key = this.zhsSectionKey(current);
+    setTimeout(() => {
+      if (!this.active) return;
+      const nowActive = this.zhsActiveSection();
+      if (nowActive && this.zhsSectionKey(nowActive) === key) {
+        const again = this.zhsFindNext(this.zhsSections(), this.zhsSections().indexOf(nowActive), !!config.skipFinished);
+        if (again) {
+          AppState.log('智慧树小节未切换成功，正在重试...', 'warn');
+          skjHumanClick(again);
+        }
+      }
+    }, 3200);
+  }
+
+  /** 智慧树视频弹题（#playTopic-dialog） */
+  zhsSolvePopupQuiz(config) {
+    let dialog = null;
+    try {
+      dialog = document.querySelector('#playTopic-dialog');
+    } catch (e) {}
+    if (!dialog || !skjIsDeepVisible(dialog)) return;
+
+    if (this.zhsAnswerPopupQuizDirect(dialog)) return;
+    this.ensureZhsQuizBridge();
+  }
+
+  /** 直接读取 Vue 实例作答（脚本管理器运行在页面上下文时可用） */
+  zhsAnswerPopupQuizDirect(dialog) {
+    try {
+      const vue = dialog.__vue__?.$parent?.$parent;
+      const info = vue?.topicInfo?.lessonTestQuestionUseInterfaceDtos?.[0];
+      const options = info?.testQuestion?.questionOptions;
+      const answers = info?.answerUs;
+      if (!vue || !options?.length || !answers?.length || typeof vue.topicClickQot !== 'function') {
+        return false;
+      }
+      const key = String(info?.testQuestion?.id || answers.join(''));
+      if (dialog.dataset.skjQuizKey === key) return true;
+      dialog.dataset.skjQuizKey = key;
+
+      const matched = options.filter((o) => o.sortUs && answers.includes(o.sortUs));
+      matched.forEach((opt, i) => {
+        setTimeout(() => {
+          try {
+            vue.topicClickQot(opt);
+          } catch (e) {}
+        }, 500 * i);
+      });
+      setTimeout(
+        () => {
+          try {
+            vue.testDialog = false;
+          } catch (e) {}
+          AppState.log('智慧树视频弹题已自动作答并关闭');
+        },
+        Math.max(1200, 500 * matched.length + 800)
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  ensureZhsQuizBridge() {
+    if (this._zhsBridgeInjected) return;
+    this._zhsBridgeInjected = true;
+    skjLogOnce('zhs-quiz-bridge', '检测到智慧树视频弹题，正在尝试自动作答...');
+    const code = `(${zhsQuizBridge.toString()})();`;
+    try {
+      if (typeof GM_addElement === 'function') {
+        GM_addElement(document.documentElement, 'script', { textContent: code });
+        return;
+      }
+    } catch (e) {}
+    try {
+      const s = document.createElement('script');
+      s.textContent = code;
+      (document.head || document.documentElement).appendChild(s);
+      s.remove();
+    } catch (e) {
+      AppState.log('智慧树弹题自动作答桥接注入失败（可能被 CSP 拦截），请手动完成弹题', 'warn');
+    }
+  }
+
+  /* ---------------------------------------------------------------------
+   * 其他平台：下一节跳转
+   * ------------------------------------------------------------------- */
+
+  genericNavigateNext(config) {
+    if (Date.now() < this._jumpLock) return;
+    if (Site.isIcve) return this.icveNavigateNext(config);
+    if (Site.isMooc) return this.moocNavigateNext(config);
+    if (Site.isXuetang) return this.xuetangNavigateNext(config);
+    this.markCourseComplete('当前平台');
+  }
+
+  icveNavigateNext(config) {
+    const nodes = Array.from(document.querySelectorAll('.panelList .node'));
+    if (!nodes.length) return;
+    const active = nodes.find((el) => el.classList.contains('active')) || null;
+    const idx = active ? nodes.indexOf(active) : -1;
+    const isDone = (el) =>
+      el.classList.contains('is-finish') || !!el.querySelector('.icon-finish, .finish, .is-finish');
+    let next = null;
+    if (idx >= 0 && idx < nodes.length - 1) {
+      const rest = nodes.slice(idx + 1);
+      next = (config.skipFinished && rest.find((el) => !isDone(el))) || rest[0] || null;
+    }
+    if (!next) return this.markCourseComplete('智慧职教');
+    AppState.log('跳转至智慧职教下一个学习单元');
+    skjHumanClick(next);
+    this._jumpLock = Date.now() + 6000;
+  }
+
+  moocNavigateNext(config) {
+    const lessons = Array.from(document.querySelectorAll('.j-item, .lesson-item, .unit-item'));
+    const active =
+      lessons.find((el) => el.classList.contains('active') || el.classList.contains('current')) || null;
+    if (active) {
+      const isDone = (el) => !!el.querySelector('.u-icon-finish, .j-icon-finish, .icon-finish');
+      const rest = lessons.slice(lessons.indexOf(active) + 1);
+      const next = (config.skipFinished && rest.find((el) => !isDone(el))) || rest[0] || null;
+      if (next) {
+        AppState.log('跳转至中国大学MOOC下一个课时');
+        skjHumanClick(next.querySelector('a') || next);
+        this._jumpLock = Date.now() + 6000;
+        return;
+      }
+    }
+    const btn = document.querySelector('.u-btn.u-btn-default.f-fr, .next-lesson, .btn-next');
+    if (btn && skjIsDisplayed(btn)) {
+      AppState.log('点击中国大学MOOC【下一讲】');
+      skjHumanClick(btn);
+      this._jumpLock = Date.now() + 6000;
+      return;
+    }
+    this.markCourseComplete('中国大学MOOC');
+  }
+
+  xuetangNavigateNext(config) {
+    const btn = document.querySelector(
+      'a.next-section, .next-unit, .btn-next, .next-btn, [class*="next-section"], [class*="nextUnit"]'
+    );
+    if (btn && skjIsDisplayed(btn)) {
+      AppState.log('点击学堂在线【下一节】');
+      skjHumanClick(btn);
+      this._jumpLock = Date.now() + 6000;
+      return;
+    }
+    this.markCourseComplete('学堂在线');
+  }
+
+  markCourseComplete(platformName) {
+    const known = platformName !== '当前平台';
+    AppState.setStatus(known ? '课程已全部完成' : '已停止自动跳转');
+    skjLogOnce(
+      'course-complete-' + platformName,
+      known
+        ? `🎉 未检测到下一节，${platformName} 课程已全部学习完成，已停止自动跳转`
+        : '⚠️ 未能识别到下一节入口，已停止自动连播（若课程尚未学完请手动跳转）'
+    );
+    this.stopAllMedia();
+  }
+
+  /** 仅暂停“已播放完毕”的媒体，避免影响用户主动观看 */
+  stopAllMedia() {
+    try {
+      this.findMediaElements(document).forEach((media) => {
+        if (!media.paused && CxDom.isMediaFinished(media)) {
+          try {
+            media.pause();
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
+  }
+
+  /* ---------------------------------------------------------------------
+   * 兼容旧接口（UI 面板 / index.js）
+   * ------------------------------------------------------------------- */
+
+  /** @deprecated 保留兼容：判定当前任务点是否已完成 */
+  isTaskPointFinished() {
+    if (Site.isChaoxing) {
+      const doc = CxDom.studyDoc();
+      if (!doc) return false;
+      const tasks = CxDom.listTasks(doc) || [];
+      return tasks.some((t) => CxDom.hasDoneKnowledge(CxDom.taskIframeOf(doc, t)));
+    }
     if (Site.isZhihuishu) {
-      // 当前小节资源列表中的下一项
-      const resList = Array.from(topDoc.querySelectorAll('.resources-list .resources-item'));
-      const activeRes = topDoc.querySelector('.resources-list .resources-item.active');
-      if (activeRes && resList.length > 1) {
-        const nextIdx = resList.indexOf(activeRes) + 1;
-        if (nextIdx < resList.length) {
-          AppState.log('切换至智慧树当前小节下一个资源');
-          resList[nextIdx].click();
-          return;
-        }
-      }
-
-      // 章节目录中的下一个视频
-      const videoItems = Array.from(topDoc.querySelectorAll('.inner-li li.clearfix.video'));
-      const activeVideo = topDoc.querySelector('.inner-li li.clearfix.video.activeNode');
-      if (activeVideo && videoItems.length > 1) {
-        const nextIdx = videoItems.indexOf(activeVideo) + 1;
-        if (nextIdx < videoItems.length) {
-          AppState.log('跳转至智慧树下一个视频小节');
-          videoItems[nextIdx].click();
-          return;
-        }
-      }
+      const sections = this.zhsSections();
+      const active = this.zhsActiveSection(sections);
+      return !!active && this.zhsIsSectionDone(active);
     }
-
-    // 3. 智慧职教 (ICVE)
     if (Site.isIcve) {
-      const nodes = Array.from(topDoc.querySelectorAll('.panelList .node'));
-      const activeNode = topDoc.querySelector('.panelList .node.active');
-      if (activeNode) {
-        const nextIdx = nodes.indexOf(activeNode) + 1;
-        if (nextIdx < nodes.length) {
-          AppState.log('跳转至智慧职教下一个学习单元');
-          nodes[nextIdx].click();
-          return;
-        }
-      }
+      const active = document.querySelector('.panelList .node.active');
+      return !!active && (active.classList.contains('is-finish') || !!active.querySelector('.icon-finish, .finish'));
     }
-
-    // 4. 中国大学 MOOC
-    if (Site.isMooc) {
-      const nextMooc = topDoc.querySelector('.u-btn.u-btn-default.f-fr, .next-lesson');
-      if (nextMooc) {
-        AppState.log('点击中国大学MOOC【下一讲】');
-        nextMooc.click();
-        return;
-      }
-    }
-
-    AppState.log('未检测到下一节按钮，课程可能已全部完成！', 'warn');
+    return false;
   }
 
-  /**
-   * 处理超星跳转下一节时可能弹出的“未完成任务点”提示弹窗
-   */
-  handleJobFinishTips(topDoc) {
-    const checkTip = () => {
-      try {
-        const tip = topDoc.querySelector('.jobFinishTip, .popDiv[id*="job"], .popDiv');
-        if (tip && window.getComputedStyle(tip).display !== 'none') {
-          const confirmNext = tip.querySelector('.popBottom .nextChapter, .popConfirm, .jb_btn, a.nextChapter');
-          if (confirmNext) {
-            confirmNext.removeAttribute('href');
-            confirmNext.click();
-            AppState.log('已自动确认跳过超星未完成任务点提示弹窗');
-          }
-        }
-      } catch (e) {}
-    };
-    setTimeout(checkTip, 800);
-    setTimeout(checkTip, 2200);
-    setTimeout(checkTip, 4500);
+  /** @deprecated 保留兼容：章节测验是否已完成 */
+  isChapterQuizComplete(doc) {
+    const status = CxDom.workStatus(doc);
+    return status === 'complete' || status === 'pendingReview';
   }
+
+  /** @deprecated 保留兼容：立即检测并解答章节测验 */
+  checkAndSolveChapterQuiz(config) {
+    if (!Site.isCxStudentStudy) return;
+    this.kick();
+  }
+
+  /** 手动/自动触发下一节 */
+  triggerNextChapter() {
+    if (Date.now() < this._jumpLock) return;
+    const config = getConfig();
+    if (Site.isChaoxing && Site.isCxStudentStudy) {
+      this.cxRunner.drainedAt = 0;
+      this.cxRunner.drainRetry = 0;
+      this.cxRunner.drain(config).catch(() => {});
+      return;
+    }
+    if (Site.isZhihuishu) {
+      const sections = this.zhsSections();
+      const active = this.zhsActiveSection(sections);
+      if (active) this.zhsNavigateNext(sections, active, config);
+      else this.markCourseComplete('智慧树');
+      return;
+    }
+    this.genericNavigateNext(config);
+  }
+}
+
+/* =========================================================================
+ * 智慧树视频弹题页面上下文桥接（对齐参考扩展 MAIN world 方案）
+ * 该函数会被序列化后注入页面上下文执行，不可引用闭包变量
+ * ========================================================================= */
+function zhsQuizBridge() {
+  var TOKEN = 'data-skj-zhs-quiz-key';
+  var warned = false;
+  setInterval(function () {
+    try {
+      var dialog = document.querySelector('#playTopic-dialog');
+      if (!dialog) return;
+      var st = window.getComputedStyle(dialog);
+      if (!st || st.display === 'none' || st.visibility === 'hidden') return;
+      var vue = dialog.__vue__ && dialog.__vue__.$parent && dialog.__vue__.$parent;
+      var info = vue && vue.topicInfo && vue.topicInfo.lessonTestQuestionUseInterfaceDtos;
+      var dto = info && info[0];
+      var options = dto && dto.testQuestion && dto.testQuestion.questionOptions;
+      var answers = dto && dto.answerUs;
+      if (!vue || !options || !options.length || !answers || !answers.length) return;
+      var key = String((dto.testQuestion && (dto.testQuestion.id || dto.testQuestion.questionId)) || answers.join(''));
+      if (dialog.getAttribute(TOKEN) === key) return;
+      dialog.setAttribute(TOKEN, key);
+
+      var matched = [];
+      for (var i = 0; i < options.length; i++) {
+        var opt = options[i];
+        if (opt && opt.sortUs && answers.indexOf(opt.sortUs) >= 0) matched.push(opt);
+      }
+      matched.forEach(function (opt, idx) {
+        setTimeout(function () {
+          try {
+            if (typeof vue.topicClickQot === 'function') vue.topicClickQot(opt);
+          } catch (e) {}
+        }, 500 * idx);
+      });
+      setTimeout(
+        function () {
+          try {
+            vue.testDialog = false;
+          } catch (e) {}
+        },
+        Math.max(1200, 500 * matched.length + 800)
+      );
+    } catch (e) {
+      if (!warned) {
+        warned = true;
+        try {
+          console.warn('[刷课酱] 智慧树弹题桥接异常', e);
+        } catch (e2) {}
+      }
+    }
+  }, 1500);
 }

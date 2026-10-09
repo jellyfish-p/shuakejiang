@@ -38,7 +38,7 @@ const Storage = {
         localStorage.setItem('skj_' + key, JSON.stringify(val));
       } catch (e) {}
     } catch (e) {
-      console.error('[刷客酱] 保存配置失败:', e);
+      console.error('[刷课酱] 保存配置失败:', e);
     }
   }
 };
@@ -53,11 +53,11 @@ const DEFAULT_CONFIG = {
   muted: true,
   autoSolveVideoQuiz: true,
 
-  // AI 解题助手设置 (OpenAI 兼容格式)
+  // AI 解题助手设置（OpenAI 兼容格式）
   examEnabled: true,
-  openaiBaseUrl: 'https://api.openai.com/v1',
+  openaiBaseUrl: 'https://api.deepseek.com/v1',
   openaiApiKey: '',
-  openaiModel: 'gpt-4o-mini',
+  openaiModel: 'deepseek-flash',
   openaiTemperature: 0.1,
   autoSubmit: true, // 默认开启做题自动提交
   solveInterval: 2000, // 每题间隔（毫秒）

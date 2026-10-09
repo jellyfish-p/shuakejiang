@@ -1,5 +1,5 @@
 /**
- * 刷客酱 - 自动化构建脚本 (Zero-Dependency Bundler)
+ * 刷课酱 - 自动化构建脚本 (Zero-Dependency Bundler)
  * 将 src/ 目录下的模块组装打包为单一的油猴用户脚本 shuakejiang.user.js
  */
 
@@ -13,11 +13,14 @@ const OUTPUT_FILE = path.join(ROOT_DIR, 'shuakejiang.user.js');
 
 const MODULE_FILES = [
   'core/mediaHook.js',
+  'core/dom.js',
   'config.js',
   'core/state.js',
   'api/openai.js',
   'modules/exam/parser.js',
   'core/site.js',
+  'modules/chaoxing/cxDom.js',
+  'modules/chaoxing/cxRunner.js',
   'modules/video/videoAssistant.js',
   'modules/exam/examAssistant.js',
   'ui/styles.js',
