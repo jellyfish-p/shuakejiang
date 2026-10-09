@@ -14,6 +14,8 @@ class VideoAssistant {
     this.cxRunner = new CxCourseRunner(this);
 
     this._jumpLock = 0;
+    this._lifecycle = 0;
+    this._lastHref = '';
     this._msgBound = false;
     this._zhsBridgeInjected = false;
     this._zhsCompleted = false;
@@ -32,6 +34,8 @@ class VideoAssistant {
 
   stop() {
     this.active = false;
+    this._lifecycle += 1;
+    this.cxRunner.cancelCurrent();
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
@@ -43,6 +47,8 @@ class VideoAssistant {
       return;
     }
     this.cxRunner.reset();
+    this._lifecycle += 1;
+    this._lastHref = location.href;
     this._zhsCompleted = false;
     this._jumpLock = 0;
     AppState.log('已重新识别当前页面任务点');
@@ -50,6 +56,9 @@ class VideoAssistant {
 
   loop() {
     if (!this.active) return;
+    const href = location.href;
+    if (this._lastHref && this._lastHref !== href) this._lifecycle += 1;
+    this._lastHref = href;
     const config = getConfig();
     try {
       if (skjIsTopFrame()) {
@@ -120,12 +129,41 @@ class VideoAssistant {
     this._msgBound = true;
     window.addEventListener('message', (event) => {
       const data = event && event.data;
-      if (!data || data.type !== 'skj:media-ended') return;
+      if (!data || data.type !== 'skj:media-ended' || !this.isTrustedMediaMessage(event)) return;
       const config = getConfig();
       if (!config.videoEnabled || !config.autoNext) return;
       AppState.log('子框架视频播放完成，准备跳转下一节...');
-      setTimeout(() => this.genericNavigateNext(getConfig()), 2000);
+      this.scheduleGenericNext(2000);
     });
+  }
+
+  isTrustedMediaMessage(event) {
+    if (!event || !event.source || event.source === window) return false;
+    try {
+      const matchedFrame = Array.from(document.querySelectorAll('iframe, frame')).some(
+        (frame) => frame.contentWindow === event.source
+      );
+      if (matchedFrame) return true;
+    } catch (e) {}
+    try {
+      const originHost = new URL(event.origin || '').hostname;
+      const currentHost = location.hostname;
+      return !!originHost &&
+        (originHost === currentHost || originHost.endsWith('.' + currentHost) || currentHost.endsWith('.' + originHost));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  scheduleGenericNext(delay = 2500) {
+    const lifecycle = this._lifecycle;
+    const href = location.href;
+    setTimeout(() => {
+      if (!this.active || lifecycle !== this._lifecycle || location.href !== href) return;
+      const config = getConfig();
+      if (!config.videoEnabled || !config.autoNext) return;
+      this.genericNavigateNext(config);
+    }, delay);
   }
 
   /* ---------------------------------------------------------------------
@@ -199,7 +237,7 @@ class VideoAssistant {
         const fresh = getConfig();
         if (!fresh.videoEnabled || !fresh.autoNext) return;
         AppState.log('当前视频播放完成，准备跳转下一节...');
-        setTimeout(() => this.genericNavigateNext(getConfig()), 2500);
+        this.scheduleGenericNext(2500);
       });
     }
 
@@ -207,7 +245,7 @@ class VideoAssistant {
     if (options.autoJump && config.autoNext && !media.dataset.skjEnded && CxDom.isMediaFinished(media)) {
       media.dataset.skjEnded = '1';
       AppState.log('检测到视频播放至末尾，准备跳转下一节...');
-      setTimeout(() => this.genericNavigateNext(getConfig()), 2500);
+      this.scheduleGenericNext(2500);
     } else if (options.notifyTop && !media.dataset.skjEnded && CxDom.isMediaFinished(media)) {
       media.dataset.skjEnded = '1';
       this.notifyTopFrameMediaEnded();
@@ -528,8 +566,10 @@ class VideoAssistant {
 
     // 与参考扩展一致：3 秒后若仍未切换成功则重试一次
     const key = this.zhsSectionKey(current);
+    const lifecycle = this._lifecycle;
+    const href = location.href;
     setTimeout(() => {
-      if (!this.active) return;
+      if (!this.active || lifecycle !== this._lifecycle || location.href !== href) return;
       const nowActive = this.zhsActiveSection();
       if (nowActive && this.zhsSectionKey(nowActive) === key) {
         const again = this.zhsFindNext(this.zhsSections(), this.zhsSections().indexOf(nowActive), !!config.skipFinished);
@@ -745,6 +785,7 @@ class VideoAssistant {
     if (Date.now() < this._jumpLock) return;
     const config = getConfig();
     if (Site.isChaoxing && Site.isCxStudentStudy) {
+      if (this.cxRunner.running) this.cxRunner.cancelCurrent();
       this.cxRunner.drainedAt = 0;
       this.cxRunner.drainRetry = 0;
       this.cxRunner.drain(config).catch(() => {});
