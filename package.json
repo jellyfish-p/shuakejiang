@@ -6,7 +6,8 @@
   "scripts": {
     "build": "node scripts/build.js",
     "watch": "node scripts/build.js --watch",
-    "test": "node scripts/check.js"
+    "test": "node scripts/check.js && npm run test:races",
+    "test:races": "node scripts/race-check.js"
   },
   "keywords": [
     "userscript",
