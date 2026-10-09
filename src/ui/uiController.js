@@ -101,7 +101,7 @@ class UIController {
         <div class="skj-header">
           <div class="skj-header-title">
             <span>🤖 刷课酱控制台</span>
-            <span class="skj-badge">v2.1.0</span>
+            <span class="skj-badge">v2.1.1</span>
           </div>
           <button class="skj-close" id="skj-close-btn">&times;</button>
         </div>
