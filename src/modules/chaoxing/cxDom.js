@@ -215,7 +215,7 @@ const CxDom = {
   },
 
   /** 批注任务点：展开并等待框架出现 */
-  async openBlockquoteTask(doc, task, timeout = 8000) {
+  async openBlockquoteTask(doc, task, timeout = 8000, cancelled = null) {
     if (!doc || !task || task.source !== 'blockquote') return null;
     let wraps = [];
     try {
@@ -244,7 +244,7 @@ const CxDom = {
         if (wrap.classList.contains('open')) return false;
         return null;
       },
-      { timeout, interval: 400 }
+      { timeout, interval: 400, cancelled }
     );
     return fr || null;
   },

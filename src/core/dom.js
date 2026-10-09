@@ -7,6 +7,14 @@ function skjSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+/** 等待 Promise，但不会因为宿主 API 永不 resolve 而卡死任务队列 */
+function skjWithTimeout(value, timeout = 10000, fallback = null) {
+  return Promise.race([
+    Promise.resolve(value),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), Math.max(0, Number(timeout) || 0)))
+  ]);
+}
+
 /** 当前是否顶层窗口 */
 function skjIsTopFrame() {
   try {
@@ -123,9 +131,11 @@ function skjFireInput(el) {
 function skjWaitFor(check, options = {}) {
   const timeout = Number(options.timeout) || 10000;
   const interval = Number(options.interval) || 250;
+  const cancelled = typeof options.cancelled === 'function' ? options.cancelled : null;
   return new Promise((resolve) => {
     const started = Date.now();
     const run = () => {
+      if (cancelled && cancelled()) return resolve(null);
       let value = null;
       try {
         value = check();

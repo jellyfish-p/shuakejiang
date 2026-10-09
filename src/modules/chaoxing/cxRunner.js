@@ -16,6 +16,9 @@ class CxCourseRunner {
     this.queue = null;
     this.index = 0;
     this.running = false;
+    this.runningEpoch = 0;
+    this.tickPromise = null;
+    this.drainPromise = null;
     this.completed = false;
     this.drainedAt = 0;
     this.drainRetry = 0;
@@ -30,7 +33,8 @@ class CxCourseRunner {
     this.epoch += 1;
     this.queue = null;
     this.index = 0;
-    this.running = false;
+    // 不要把 running 强行清零：旧异步任务仍在执行时，tickPromise/epoch
+    // 会负责阻止新任务重入，并让旧任务在下一个取消点退出。
     this.completed = false;
     this.drainedAt = 0;
     this.drainRetry = 0;
@@ -38,8 +42,24 @@ class CxCourseRunner {
     this.failCount = 0;
   }
 
+  /** 取消当前任务，但保留当前队列/路由，供手动强制跳转使用 */
+  cancelCurrent() {
+    this.epoch += 1;
+  }
+
   /** 主流循环调用：返回 true 表示本 tick 已由超星逻辑接管 */
   async tick(config) {
+    if (this.tickPromise) return this.tickPromise;
+    const promise = this.runTick(config);
+    this.tickPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.tickPromise === promise) this.tickPromise = null;
+    }
+  }
+
+  async runTick(config) {
     if (!Site.isCxStudentStudy) return false;
 
     const route = CxDom.routeInfo();
@@ -67,9 +87,10 @@ class CxCourseRunner {
     if (!this.queue) {
       const tasks = CxDom.listTasks();
       if (!tasks) return true;
-      // 与参考扩展一致：页面刚切换时任务点可能尚未渲染，先等待再判定为“纯图文任务点”
+      // 页面刚切换时任务点可能尚未渲染，延长观察窗口，避免把延迟出现的 iframe
+      // 误判为纯图文任务点并提前跳走。
       const realTasks = tasks.filter((t) => t.source !== 'page');
-      if (!realTasks.length && Date.now() - (this.routeSeenAt || 0) < 6000) return true;
+      if (!realTasks.length && Date.now() - (this.routeSeenAt || 0) < 12000) return true;
       this.queue = tasks;
       this.index = 0;
       AppState.log(`识别到 ${tasks.length} 个任务点：${tasks.map((t) => t.type).join(' → ')}`);
@@ -140,6 +161,7 @@ class CxCourseRunner {
   async run(task, config) {
     this.running = true;
     const epoch = this.epoch;
+    this.runningEpoch = epoch;
     AppState.setStatus(`正在处理任务点 [#${this.index + 1}/${this.queue.length}] ${task.type}`);
     let result = 'failed';
     try {
@@ -153,8 +175,12 @@ class CxCourseRunner {
       AppState.log(`任务点处理异常: ${e.message}`, 'error');
       result = 'failed';
     } finally {
-      this.running = false;
-      AppState.setStatus('运行中');
+      // 只有当前 run 仍是持有者时才释放 running，避免旧任务覆盖新状态。
+      if (this.runningEpoch === epoch) {
+        this.running = false;
+        this.runningEpoch = 0;
+        if (this.epoch === epoch) AppState.setStatus('运行中');
+      }
     }
 
     if (this.epoch !== epoch) return; // 页面已切换，结果作废
@@ -184,7 +210,7 @@ class CxCourseRunner {
 
     // 批注任务点需要先展开
     if (!iframe && task.source === 'blockquote') {
-      iframe = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task);
+      iframe = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task, 8000, () => this.epoch !== epoch);
       if (this.epoch !== epoch) return 'paused';
       if (!iframe) return this.warnOnce(task, '批注任务点未展开出内容，已跳过', 'skipped');
     }
@@ -203,30 +229,32 @@ class CxCourseRunner {
             return null;
           }
         },
-        { timeout: 25000, interval: 500 }
+        { timeout: 25000, interval: 500, cancelled: () => this.epoch !== epoch }
       );
 
     let media = await findMedia(iframe);
     if (this.epoch !== epoch) return 'paused';
     if (!media) return this.warnOnce(task, '当前任务点未找到音视频，已跳过', 'skipped');
 
-    if (config.skipFinished && CxDom.hasDoneKnowledge(iframe)) return 'done';
+    const initialConfig = config || getConfig();
+    if (!initialConfig.videoEnabled) return 'paused';
+    if (initialConfig.skipFinished && CxDom.hasDoneKnowledge(iframe)) return 'done';
 
     try {
-      if (config.muted) media.muted = true;
+      if (initialConfig.muted) media.muted = true;
     } catch (e) {}
-    this.va.applyPlaybackRate(media, config.playbackRate);
+    this.va.applyPlaybackRate(media, initialConfig.playbackRate);
     AppState.log(
       `开始播放${kind === 'audio' ? '音频' : '视频'}：${String(task.src || '').split('/').slice(-3, -1).join('/') || '当前任务点'}`
     );
 
-    if (config.autoPlay && media.paused && !media.ended) {
+    if (initialConfig.autoPlay && media.paused && !media.ended) {
       try {
-        await media.play();
+        await skjWithTimeout(media.play(), 5000);
       } catch (e) {
         try {
           media.muted = true;
-          await media.play();
+          await skjWithTimeout(media.play(), 5000);
         } catch (e2) {}
       }
     }
@@ -237,6 +265,8 @@ class CxCourseRunner {
     while (true) {
       if (!this.va.active) return 'paused';
       if (this.epoch !== epoch) return 'paused';
+      const liveConfig = getConfig();
+      if (!liveConfig.videoEnabled) return 'paused';
 
       // 平台可能重建任务点框架，此时需要重新解析框架与媒体元素
       if (!iframe.isConnected) {
@@ -253,9 +283,9 @@ class CxCourseRunner {
         if (againMedia) {
           media = againMedia;
           try {
-            if (config.muted) media.muted = true;
+            if (liveConfig.muted) media.muted = true;
           } catch (e) {}
-          this.va.applyPlaybackRate(media, config.playbackRate);
+          this.va.applyPlaybackRate(media, liveConfig.playbackRate);
         }
         await skjSleep(600);
         continue;
@@ -268,25 +298,26 @@ class CxCourseRunner {
         AppState.log('当前任务点播放完毕');
         return 'done';
       }
-      if (config.skipFinished && CxDom.hasDoneKnowledge(iframe)) return 'done';
+      if (liveConfig.skipFinished && CxDom.hasDoneKnowledge(iframe)) return 'done';
 
-      this.va.applyPlaybackRate(media, config.playbackRate);
+      this.va.applyPlaybackRate(media, liveConfig.playbackRate);
       this.va.handlePauseArtifacts(iframe.contentDocument);
 
-      if (config.autoSolveVideoQuiz && CxDom.isVideoQuizVisible(iframe)) {
-        const r = await this.va.cxSolveVideoQuiz(iframe, config, quizTries);
+      if (liveConfig.autoSolveVideoQuiz && CxDom.isVideoQuizVisible(iframe)) {
+        const r = await this.va.cxSolveVideoQuiz(iframe, liveConfig, quizTries);
         if (r === 'retry') {
           quizTries += 1;
           if (quizTries >= 3) {
-            AppState.log('视频弹题连续答错 3 次，请手动处理后将继续播放', 'warn');
+            AppState.log('视频弹题连续答错 3 次，已暂停当前任务，请手动处理后再继续', 'warn');
+            return 'paused';
           }
         }
         if (this.epoch !== epoch) return 'paused';
       }
 
-      if (media.paused && !media.ended) {
+      if (liveConfig.autoPlay && media.paused && !media.ended) {
         try {
-          await media.play();
+          await skjWithTimeout(media.play(), 5000);
         } catch (e) {}
       }
 
@@ -311,9 +342,10 @@ class CxCourseRunner {
           return null;
         }
       },
-      { timeout: 25000, interval: 600 }
+      { timeout: 25000, interval: 600, cancelled: () => this.epoch !== epoch }
     );
     if (this.epoch !== epoch) return 'paused';
+    if (!(config || getConfig()).videoEnabled) return 'paused';
     if (!panView) return this.warnOnce(task, '未检测到文档阅读容器，已跳过该任务点', 'skipped');
 
     const pages = await skjWaitFor(
@@ -331,7 +363,7 @@ class CxCourseRunner {
           return null;
         }
       },
-      { timeout: 40000, interval: 600 }
+      { timeout: 40000, interval: 600, cancelled: () => this.epoch !== epoch }
     );
     if (this.epoch !== epoch) return 'paused';
     if (!pages) return this.warnOnce(task, '文档页面加载超时，已跳过', 'skipped');
@@ -340,7 +372,9 @@ class CxCourseRunner {
     const startedAt = Date.now();
     while (this.va.active) {
       if (this.epoch !== epoch || !iframe.isConnected) return 'paused';
-      if (config.skipFinished && CxDom.hasDoneKnowledge(iframe)) return 'done';
+      const liveConfig = getConfig();
+      if (!liveConfig.videoEnabled) return 'paused';
+      if (liveConfig.skipFinished && CxDom.hasDoneKnowledge(iframe)) return 'done';
 
       let scroller = null;
       try {
@@ -376,7 +410,11 @@ class CxCourseRunner {
     }
 
     this.notifyPdfFinished(task.iframeIndex);
-    const done = await skjWaitFor(() => CxDom.hasDoneKnowledge(iframe), { timeout: 5000, interval: 500 });
+    const done = await skjWaitFor(() => CxDom.hasDoneKnowledge(iframe), {
+      timeout: 5000,
+      interval: 500,
+      cancelled: () => this.epoch !== epoch
+    });
     if (!done) AppState.log('文档已翻阅至末尾（平台未返回完成标记，将继续下一节）', 'warn');
     return 'done';
   }
@@ -414,19 +452,23 @@ class CxCourseRunner {
     const iframe = CxDom.taskIframeOf(CxDom.studyDoc(), task);
 
     if (!iframe && task.source === 'blockquote') {
-      const fr = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task);
+      const fr = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task, 8000, () => this.epoch !== epoch);
       if (this.epoch !== epoch) return 'paused';
       if (!fr) return this.warnOnce(task, '批注任务点未展开出内容，已跳过', 'skipped');
       return 'done';
     }
     if (!iframe) return this.warnOnce(task, '未找到测验内容框架，已跳过', 'skipped');
 
-    if (!config.examEnabled) {
+    if (!(config || getConfig()).examEnabled) {
       AppState.log('AI 解题助手已关闭，跳过章节测验任务点', 'warn');
       return 'skipped';
     }
 
-    const doc = await skjWaitFor(() => CxDom.workDoc(iframe), { timeout: 25000, interval: 500 });
+    const doc = await skjWaitFor(() => CxDom.workDoc(iframe), {
+      timeout: 25000,
+      interval: 500,
+      cancelled: () => this.epoch !== epoch
+    });
     if (this.epoch !== epoch) return 'paused';
     if (!doc) return this.warnOnce(task, '未找到测验文档，已跳过', 'skipped');
 
@@ -436,17 +478,23 @@ class CxCourseRunner {
       return 'done';
     }
 
-    if (!String(config.openaiApiKey || '').trim()) {
+    if (!String(getConfig().openaiApiKey || '').trim()) {
       AppState.log('检测到章节测验，但未配置 API Key，已暂存并跳过（请手动完成）', 'error');
       try {
-        await this.va.examAssist.saveCxWork(doc, { submit: false });
+        const reason = await this.va.examAssist.saveCxWork(doc, {
+          submit: false,
+          cancelled: () => this.epoch !== epoch
+        });
+        if (reason === 'cancelled') return 'paused';
       } catch (e) {}
       return 'done';
     }
 
     AppState.log('检测到章节测验任务点，启动 AI 自动答题...');
-    const res = await this.va.examAssist.solveCxWorkDoc(doc, config);
-    if (this.epoch !== epoch) return 'paused';
+    const res = await this.va.examAssist.solveCxWorkDoc(doc, config, {
+      cancelled: () => this.epoch !== epoch || !getConfig().examEnabled
+    });
+    if (this.epoch !== epoch || res.status === 'paused') return 'paused';
     AppState.log(
       `章节测验处理完成：${res.reason || res.status}`,
       res.submitSafe === false ? 'warn' : 'info'
@@ -468,7 +516,8 @@ class CxCourseRunner {
 
   async execUnsupported(task, config) {
     if (task.source === 'blockquote') {
-      const fr = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task, 6000);
+      const epoch = this.epoch;
+      const fr = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task, 6000, () => this.epoch !== epoch);
       if (fr) {
         AppState.log('已展开批注任务点');
         return 'done';
@@ -505,16 +554,28 @@ class CxCourseRunner {
   }
 
   async drain(config) {
+    if (this.drainPromise) return this.drainPromise;
+    const promise = this.runDrain(config);
+    this.drainPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.drainPromise === promise) this.drainPromise = null;
+    }
+  }
+
+  async runDrain(config) {
     if (Date.now() - this.drainedAt < 2500) return;
     this.drainedAt = Date.now();
 
-    if (!config.autoNext) {
-      AppState.log('当前页面任务点已全部处理完毕（自动连续播放已关闭）');
-      return;
+    const liveConfig = getConfig();
+    if (!liveConfig.autoNext) {
+      skjLogOnce(`cx-auto-next-off-${this.routeKey}`, '当前页面任务点已全部处理完毕（自动连续播放已关闭）');
+      return 'paused';
     }
 
     const result = await this.goNext();
-    if (result === 'navigating') {
+    if (result === 'navigating' || result === 'paused') {
       this.drainRetry = 0;
       return;
     }
@@ -544,34 +605,36 @@ class CxCourseRunner {
     } catch (e) {}
     await skjSleep(1200);
     if (this.epoch !== epoch) return 'navigating';
+    if (!getConfig().autoNext) return 'paused';
 
     // 1) 等待【下一节】按钮出现（刚提交完测验/切章时页面可能正在重绘）
     const next = await skjWaitFor(
       () => (this.epoch === epoch ? this.findVisible('#prevNextFocusNext') : null),
-      { timeout: 4000, interval: 400 }
+      { timeout: 4000, interval: 400, cancelled: () => this.epoch !== epoch }
     );
     if (this.epoch !== epoch) return 'navigating';
+    if (!getConfig().autoNext) return 'paused';
     if (next) {
       AppState.log('任务点已全部完成，点击【下一节】继续学习');
       skjHumanClick(next);
       this.jumpLock = Date.now() + 6000;
-      this.handleJobFinishTip();
+      this.handleJobFinishTip(this.routeKey);
       return 'navigating';
     }
 
     // 2) 不同壳版本的备用【下一节】入口
     const alt = this.findVisible('.nextChapter, #prevNextFocus .nextChapter, a.next-node, a.nextChapter');
-    if (alt) {
+    if (alt && getConfig().autoNext) {
       AppState.log('【下一节】按钮不可见，尝试点击备用跳转入口');
       skjHumanClick(alt);
       this.jumpLock = Date.now() + 6000;
-      this.handleJobFinishTip();
+      this.handleJobFinishTip(this.routeKey);
       return 'navigating';
     }
 
     // 3) 章节内任务点标签卡兜底
     const tab = this.nextTabItem();
-    if (tab) {
+    if (tab && getConfig().autoNext) {
       AppState.log('未找到【下一节】，尝试切换到当前章节的下一个任务点');
       skjHumanClick(tab.querySelector('a') || tab);
       this.jumpLock = Date.now() + 6000;
@@ -599,9 +662,12 @@ class CxCourseRunner {
   }
 
   /** 自动确认“任务点未完成”提示弹窗（与参考扩展同样的探测节奏） */
-  handleJobFinishTip() {
+  handleJobFinishTip(expectedRouteKey = this.routeKey) {
     const check = () => {
       try {
+        if (!this.va.active || this.routeKey !== expectedRouteKey) return;
+        const currentRoute = CxDom.routeInfo();
+        if (currentRoute && currentRoute.key !== expectedRouteKey) return;
         const tip = this.findVisible('.jobFinishTip');
         const btn = tip
           ? tip.querySelector('.popBottom .nextChapter, .popBottom a')
