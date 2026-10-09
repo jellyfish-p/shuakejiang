@@ -395,9 +395,11 @@ class UIController {
     const inputApiKey = document.getElementById('skj-cfg-openaiApiKey')?.value.trim() || '';
     const inputModel = document.getElementById('skj-cfg-openaiModel')?.value.trim() || 'gpt-4o-mini';
 
-    Storage.set('openaiBaseUrl', inputBaseUrl);
-    Storage.set('openaiApiKey', inputApiKey);
-    Storage.set('openaiModel', inputModel);
+    setConfig({
+      openaiBaseUrl: inputBaseUrl,
+      openaiApiKey: inputApiKey,
+      openaiModel: inputModel
+    });
 
     this.showSaveTip('✅ API 配置已成功保存！');
     if (!silent) {

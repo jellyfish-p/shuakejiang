@@ -404,17 +404,35 @@
     panelPosition: { top: 80, right: 20 }
   };
 
+  const CONFIG_VERSION_KEY = 'configVersion';
+
   function getConfig() {
-    const cfg = {};
-    for (const k of Object.keys(DEFAULT_CONFIG)) {
-      cfg[k] = Storage.get(k, DEFAULT_CONFIG[k]);
+    let lastCfg = { ...DEFAULT_CONFIG };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const startVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
+      if (startVersion % 2 === 1) continue; // writer is between begin/end markers
+
+      const cfg = {};
+      for (const k of Object.keys(DEFAULT_CONFIG)) {
+        cfg[k] = Storage.get(k, DEFAULT_CONFIG[k]);
+      }
+      const endVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
+      lastCfg = cfg;
+      if (startVersion === endVersion && endVersion % 2 === 0) return cfg;
     }
-    return cfg;
+    return lastCfg;
   }
 
   function setConfig(cfg) {
-    for (const k of Object.keys(cfg)) {
-      Storage.set(k, cfg[k]);
+    const currentVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
+    const baseVersion = currentVersion % 2 === 0 ? currentVersion : currentVersion + 1;
+    Storage.set(CONFIG_VERSION_KEY, baseVersion + 1);
+    try {
+      for (const k of Object.keys(cfg)) {
+        Storage.set(k, cfg[k]);
+      }
+    } finally {
+      Storage.set(CONFIG_VERSION_KEY, baseVersion + 2);
     }
   }
 
@@ -4097,9 +4115,11 @@
       const inputApiKey = document.getElementById('skj-cfg-openaiApiKey')?.value.trim() || '';
       const inputModel = document.getElementById('skj-cfg-openaiModel')?.value.trim() || 'gpt-4o-mini';
 
-      Storage.set('openaiBaseUrl', inputBaseUrl);
-      Storage.set('openaiApiKey', inputApiKey);
-      Storage.set('openaiModel', inputModel);
+      setConfig({
+        openaiBaseUrl: inputBaseUrl,
+        openaiApiKey: inputApiKey,
+        openaiModel: inputModel
+      });
 
       this.showSaveTip('✅ API 配置已成功保存！');
       if (!silent) {
