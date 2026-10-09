@@ -64,6 +64,7 @@ const requiredIdentifiers = [
   'AppState',
   'requestOpenAI',
   'Site',
+  'CxCatalogNavigator',
   'VideoAssistant',
   'ExamAssistant',
   'UIController',

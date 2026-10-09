@@ -26,6 +26,7 @@ class CxCourseRunner {
     this.failCount = 0;
     this.blockedQuizKey = '';
     this.warnedIds = new Set();
+    this.catalogNavigator = new CxCatalogNavigator();
   }
 
   reset() {
@@ -42,6 +43,7 @@ class CxCourseRunner {
     this.jumpLock = 0;
     this.failCount = 0;
     this.blockedQuizKey = '';
+    this.catalogNavigator.jumpLock = 0;
   }
 
   /** 取消当前任务，但保留当前队列/路由，供手动强制跳转使用 */
@@ -585,6 +587,16 @@ class CxCourseRunner {
     if (!liveConfig.autoNext) {
       skjLogOnce(`cx-auto-next-off-${this.routeKey}`, '当前页面任务点已全部处理完毕（自动连续播放已关闭）');
       return 'paused';
+    }
+
+    // 目录节点带有平台原生 getTeacherAjax onclick。优先读取 #coursetree
+    // 的 _studystate.nextChapterId，跳过已完成章节并支持回头补漏。
+    const catalogResult = this.catalogNavigator.navigate(liveConfig);
+    if (catalogResult === 'navigating') {
+      this.drainRetry = 0;
+      this.jumpLock = Date.now() + 6000;
+      this.handleJobFinishTip(this.routeKey);
+      return;
     }
 
     const result = await this.goNext();

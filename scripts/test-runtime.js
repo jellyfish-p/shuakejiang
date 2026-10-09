@@ -63,7 +63,7 @@ function runtime() {
   });
   const source = fs.readFileSync(path.join(__dirname, '..', 'shuakejiang.user.js'), 'utf8');
   const code = source.replace(/\n\s*main\(\);\s*\n\}\)\(\);\s*$/, `
-    globalThis.api = { CxCourseRunner, CxDom, Site, ExamAssistant, VideoAssistant, UIController,
+    globalThis.api = { CxCourseRunner, CxCatalogNavigator, CxDom, Site, ExamAssistant, VideoAssistant, UIController,
       AppState, Storage, getConfig, setConfig, requestOpenAI, skjWaitFor, skjWithTimeout };
   })();`);
   if (code === source) throw new Error('Runtime export seam missing');

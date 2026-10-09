@@ -87,6 +87,61 @@ test('same-origin stranger cannot trigger cross-frame navigation', () => {
   assert.equal(va.isTrustedMediaMessage({ source: {}, origin: 'https://mooc1.chaoxing.com' }), false);
 });
 
+test('catalog reads rendered #coursetree state', () => {
+  const r = runtime();
+  const tree = r.node();
+  const marker = r.node();
+  marker.value = '{nextChapterId:200,unfinishCount:1}';
+  const active = r.node();
+  active.id = 'cur100';
+  const pending = r.node();
+  pending.id = 'cur200';
+  const count = r.node();
+  count.value = '2';
+  pending.select('.icon_Completed, .ans-job-finished', null);
+  pending.select('.jobUnfinishCount, .orangeNew', [count]);
+  tree.select('#_studystate', marker)
+    .select('.posCatalog_active[id^="cur"]', active)
+    .select('.posCatalog_select[id^="cur"]', [active, pending]);
+  r.document.select('#coursetree', tree);
+
+  const state = new r.CxCatalogNavigator().readState();
+  assert.equal(state.currentChapterId, '100');
+  assert.equal(state.nextChapterId, '200');
+  assert.equal(state.entries.find((entry) => entry.id === '200').unfinished, true);
+});
+
+test('catalog prefers platform next unfinished chapter', () => {
+  const r = runtime();
+  const navigator = new r.CxCatalogNavigator();
+  navigator.readState = () => ({
+    currentChapterId: '1240950178',
+    nextChapterId: '1240950298',
+    unfinishCount: 64,
+    entries: []
+  });
+  const target = r.node();
+  navigator.findNode = () => target;
+  assert.equal(navigator.navigate({ autoNext: true, skipFinished: true }), 'navigating');
+  assert.equal(target.clicks, 1, 'native click should be dispatched');
+});
+
+test('catalog wraps to the first pending chapter when later entries are complete', () => {
+  const r = runtime();
+  const navigator = new r.CxCatalogNavigator();
+  const state = {
+    currentChapterId: '30',
+    nextChapterId: '30',
+    unfinishCount: 1,
+    entries: [
+      { id: '10', order: 0, unfinished: true, completed: false },
+      { id: '20', order: 1, unfinished: false, completed: true },
+      { id: '30', order: 2, unfinished: false, completed: false }
+    ]
+  };
+  assert.equal(navigator.chooseTarget(state), '10');
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {

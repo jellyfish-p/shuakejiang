@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         刷课酱 - 网课视频助手 & AI 解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.1.1
-// @description  刷课酱 - 超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；按任务点队列依次推进（自动跳过已完成任务点），全部完成后自动停止；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
+// @version      2.1.2
+// @description  刷课酱 - 超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；按任务点队列依次推进并从课程目录跳转下一个未完成章节，全部完成后自动停止；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
 // @homepageURL  https://github.com/jellyfish-p/shuakejiang
