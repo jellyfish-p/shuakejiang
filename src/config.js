@@ -66,34 +66,25 @@ const DEFAULT_CONFIG = {
   panelPosition: { top: 80, right: 20 }
 };
 
-const CONFIG_VERSION_KEY = 'configVersion';
+const CONFIG_SNAPSHOT_KEY = 'configSnapshotV1';
 
 function getConfig() {
-  let lastCfg = { ...DEFAULT_CONFIG };
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const startVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
-    if (startVersion % 2 === 1) continue; // writer is between begin/end markers
-
-    const cfg = {};
-    for (const k of Object.keys(DEFAULT_CONFIG)) {
-      cfg[k] = Storage.get(k, DEFAULT_CONFIG[k]);
-    }
-    const endVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
-    lastCfg = cfg;
-    if (startVersion === endVersion && endVersion % 2 === 0) return cfg;
+  const snapshot = Storage.get(CONFIG_SNAPSHOT_KEY, null);
+  if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+    return { ...DEFAULT_CONFIG, ...snapshot };
   }
-  return lastCfg;
+  // 兼容旧版逐键存储，包括写入被中断而遗留的 configVersion。
+  const cfg = {};
+  for (const k of Object.keys(DEFAULT_CONFIG)) cfg[k] = Storage.get(k, DEFAULT_CONFIG[k]);
+  return cfg;
 }
 
-function setConfig(cfg) {
-  const currentVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
-  const baseVersion = currentVersion % 2 === 0 ? currentVersion : currentVersion + 1;
-  Storage.set(CONFIG_VERSION_KEY, baseVersion + 1);
-  try {
-    for (const k of Object.keys(cfg)) {
-      Storage.set(k, cfg[k]);
-    }
-  } finally {
-    Storage.set(CONFIG_VERSION_KEY, baseVersion + 2);
+function setConfig(patch) {
+  const cfg = getConfig();
+  for (const k of Object.keys(DEFAULT_CONFIG)) {
+    if (Object.prototype.hasOwnProperty.call(patch, k)) cfg[k] = patch[k];
   }
+  // 单值替换：读取者只会看到完整的旧/新快照，不会读到半套 API 参数。
+  // 多标签页同时保存时采用存储的最后写入者优先语义，不使用可遗留的忙锁。
+  Storage.set(CONFIG_SNAPSHOT_KEY, cfg);
 }

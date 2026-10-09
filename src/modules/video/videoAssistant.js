@@ -41,6 +41,11 @@ class VideoAssistant {
   }
 
   /** 页面切换或手动触发：强制重新识别任务点 */
+  optionsChanged() {
+    this._lifecycle += 1;
+    if (this.cxRunner.running) this.cxRunner.cancelCurrent();
+  }
+
   kick() {
     if (!this.active) {
       this.start();
@@ -145,14 +150,7 @@ class VideoAssistant {
       );
       if (matchedFrame) return true;
     } catch (e) {}
-    try {
-      const originHost = new URL(event.origin || '').hostname;
-      const currentHost = location.hostname;
-      return !!originHost &&
-        (originHost === currentHost || originHost.endsWith('.' + currentHost) || currentHost.endsWith('.' + originHost));
-    } catch (e) {
-      return false;
-    }
+    return false;
   }
 
   scheduleGenericNext(delay = 2500) {

@@ -114,7 +114,8 @@ class ExamAssistant {
     const questions = Array.from(doc.querySelectorAll('#ZyBottom .singleQuesId'));
     if (!questions.length) {
       AppState.log('当前测验未识别到题目，已暂存后跳过', 'warn');
-      await this.saveCxWork(doc, { submit: false });
+      const reason = await this.saveCxWork(doc, { submit: false, cancelled, allowDisabled: !respectEnabled });
+      if (reason === 'cancelled') return { status: 'paused', reason, submitSafe: false };
       return { status: 'done', reason: 'no_question', submitSafe: false };
     }
 
@@ -157,12 +158,13 @@ class ExamAssistant {
     if (liveConfig.autoSubmit && failed === 0) {
       const reason = await this.saveCxWork(doc, {
         submit: true,
-        cancelled
+        cancelled,
+        allowDisabled: !respectEnabled
       });
       if (reason === 'cancelled') return { status: 'paused', reason, submitSafe: false };
       return { status: 'done', reason, submitSafe: reason === 'submitted' };
     }
-    await this.saveCxWork(doc, { submit: false, cancelled });
+    await this.saveCxWork(doc, { submit: false, cancelled, allowDisabled: !respectEnabled });
     return {
       status: 'done',
       reason: failed ? `partial_saved(${failed}题未完成)` : 'saved',
@@ -388,6 +390,7 @@ class ExamAssistant {
    */
   async saveCxWork(doc, options = {}) {
     const submit = !!options.submit;
+    const allowDisabled = !!options.allowDisabled;
     const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
     try {
       if (cancelled()) return 'cancelled';
@@ -402,6 +405,7 @@ class ExamAssistant {
       await skjSleep(1200);
       if (cancelled()) return 'cancelled';
       if (!submit) return 'saved';
+      if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return 'cancelled';
 
       // 2) 提交
       const submitBtn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
@@ -643,6 +647,7 @@ class ExamAssistant {
         AppState.log('存在未完成题目，已暂存答案，请手动核对后提交', 'warn');
         return;
       }
+      if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return;
       const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
       if (!completeBtn) return;
       skjHumanClick(completeBtn);

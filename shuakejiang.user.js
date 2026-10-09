@@ -404,36 +404,27 @@
     panelPosition: { top: 80, right: 20 }
   };
 
-  const CONFIG_VERSION_KEY = 'configVersion';
+  const CONFIG_SNAPSHOT_KEY = 'configSnapshotV1';
 
   function getConfig() {
-    let lastCfg = { ...DEFAULT_CONFIG };
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const startVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
-      if (startVersion % 2 === 1) continue; // writer is between begin/end markers
-
-      const cfg = {};
-      for (const k of Object.keys(DEFAULT_CONFIG)) {
-        cfg[k] = Storage.get(k, DEFAULT_CONFIG[k]);
-      }
-      const endVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
-      lastCfg = cfg;
-      if (startVersion === endVersion && endVersion % 2 === 0) return cfg;
+    const snapshot = Storage.get(CONFIG_SNAPSHOT_KEY, null);
+    if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+      return { ...DEFAULT_CONFIG, ...snapshot };
     }
-    return lastCfg;
+    // 兼容旧版逐键存储，包括写入被中断而遗留的 configVersion。
+    const cfg = {};
+    for (const k of Object.keys(DEFAULT_CONFIG)) cfg[k] = Storage.get(k, DEFAULT_CONFIG[k]);
+    return cfg;
   }
 
-  function setConfig(cfg) {
-    const currentVersion = Number(Storage.get(CONFIG_VERSION_KEY, 0)) || 0;
-    const baseVersion = currentVersion % 2 === 0 ? currentVersion : currentVersion + 1;
-    Storage.set(CONFIG_VERSION_KEY, baseVersion + 1);
-    try {
-      for (const k of Object.keys(cfg)) {
-        Storage.set(k, cfg[k]);
-      }
-    } finally {
-      Storage.set(CONFIG_VERSION_KEY, baseVersion + 2);
+  function setConfig(patch) {
+    const cfg = getConfig();
+    for (const k of Object.keys(DEFAULT_CONFIG)) {
+      if (Object.prototype.hasOwnProperty.call(patch, k)) cfg[k] = patch[k];
     }
+    // 单值替换：读取者只会看到完整的旧/新快照，不会读到半套 API 参数。
+    // 多标签页同时保存时采用存储的最后写入者优先语义，不使用可遗留的忙锁。
+    Storage.set(CONFIG_SNAPSHOT_KEY, cfg);
   }
 
   /* =========================================================================
@@ -555,7 +546,7 @@
             controller?.abort();
           } catch (e) {}
         }, 45000);
-        fetch(endpoint, {
+        const request = fetch(endpoint, {
           method: 'POST',
           headers: headers,
           body: JSON.stringify(body),
@@ -563,17 +554,21 @@
         })
           .then((r) => r.json())
           .then((data) => {
-            if (data.choices?.[0]?.message?.content) {
-              resolve(data.choices[0].message.content);
-            } else {
-              reject(new Error(data.error?.message || '请求失败'));
-            }
-          })
-          .catch((err) => {
-            if (controller?.signal?.aborted) reject(new Error('请求超时 (45s)，请检查 API 地址与网络连接'));
-            else reject(err);
-          })
-          .finally(() => clearTimeout(timeoutId));
+            if (data.choices?.[0]?.message?.content) return data.choices[0].message.content;
+            throw new Error(data.error?.message || '请求失败');
+          });
+        const timeout = new Promise((_, rejectTimeout) =>
+          setTimeout(() => rejectTimeout(new Error('请求超时 (45s)，请检查 API 地址与网络连接')), 45000)
+        );
+        Promise.race([request, timeout])
+          .then(resolve)
+          .catch((err) => reject(err))
+          .finally(() => {
+            clearTimeout(timeoutId);
+            try {
+              controller?.abort();
+            } catch (e) {}
+          });
       }
     });
   }
@@ -1061,6 +1056,7 @@
       this.drainRetry = 0;
       this.jumpLock = 0;
       this.failCount = 0;
+      this.blockedQuizKey = '';
       this.warnedIds = new Set();
     }
 
@@ -1077,6 +1073,7 @@
       this.drainRetry = 0;
       this.jumpLock = 0;
       this.failCount = 0;
+      this.blockedQuizKey = '';
     }
 
     /** 取消当前任务，但保留当前队列/路由，供手动强制跳转使用 */
@@ -1086,7 +1083,11 @@
 
     /** 主流循环调用：返回 true 表示本 tick 已由超星逻辑接管 */
     async tick(config) {
-      if (this.tickPromise) return this.tickPromise;
+      if (this.tickPromise) {
+        const route = CxDom.routeInfo();
+        if (route && this.routeKey && route.key !== this.routeKey) this.cancelCurrent();
+        return this.tickPromise;
+      }
       const promise = this.runTick(config);
       this.tickPromise = promise;
       try {
@@ -1304,6 +1305,12 @@
         if (this.epoch !== epoch) return 'paused';
         const liveConfig = getConfig();
         if (!liveConfig.videoEnabled) return 'paused';
+        const quizKey = `${this.routeKey}|${task.id || task.src || kind}`;
+        if (this.blockedQuizKey === quizKey) {
+          if (CxDom.isVideoQuizVisible(iframe)) return 'paused';
+          this.blockedQuizKey = '';
+          quizTries = 0;
+        }
 
         // 平台可能重建任务点框架，此时需要重新解析框架与媒体元素
         if (!iframe.isConnected) {
@@ -1345,6 +1352,7 @@
           if (r === 'retry') {
             quizTries += 1;
             if (quizTries >= 3) {
+              this.blockedQuizKey = quizKey;
               AppState.log('视频弹题连续答错 3 次，已暂停当前任务，请手动处理后再继续', 'warn');
               return 'paused';
             }
@@ -1761,6 +1769,11 @@
     }
 
     /** 页面切换或手动触发：强制重新识别任务点 */
+    optionsChanged() {
+      this._lifecycle += 1;
+      if (this.cxRunner.running) this.cxRunner.cancelCurrent();
+    }
+
     kick() {
       if (!this.active) {
         this.start();
@@ -1865,14 +1878,7 @@
         );
         if (matchedFrame) return true;
       } catch (e) {}
-      try {
-        const originHost = new URL(event.origin || '').hostname;
-        const currentHost = location.hostname;
-        return !!originHost &&
-          (originHost === currentHost || originHost.endsWith('.' + currentHost) || currentHost.endsWith('.' + originHost));
-      } catch (e) {
-        return false;
-      }
+      return false;
     }
 
     scheduleGenericNext(delay = 2500) {
@@ -2697,7 +2703,8 @@
       const questions = Array.from(doc.querySelectorAll('#ZyBottom .singleQuesId'));
       if (!questions.length) {
         AppState.log('当前测验未识别到题目，已暂存后跳过', 'warn');
-        await this.saveCxWork(doc, { submit: false });
+        const reason = await this.saveCxWork(doc, { submit: false, cancelled, allowDisabled: !respectEnabled });
+        if (reason === 'cancelled') return { status: 'paused', reason, submitSafe: false };
         return { status: 'done', reason: 'no_question', submitSafe: false };
       }
 
@@ -2740,12 +2747,13 @@
       if (liveConfig.autoSubmit && failed === 0) {
         const reason = await this.saveCxWork(doc, {
           submit: true,
-          cancelled
+          cancelled,
+          allowDisabled: !respectEnabled
         });
         if (reason === 'cancelled') return { status: 'paused', reason, submitSafe: false };
         return { status: 'done', reason, submitSafe: reason === 'submitted' };
       }
-      await this.saveCxWork(doc, { submit: false, cancelled });
+      await this.saveCxWork(doc, { submit: false, cancelled, allowDisabled: !respectEnabled });
       return {
         status: 'done',
         reason: failed ? `partial_saved(${failed}题未完成)` : 'saved',
@@ -2971,6 +2979,7 @@
      */
     async saveCxWork(doc, options = {}) {
       const submit = !!options.submit;
+      const allowDisabled = !!options.allowDisabled;
       const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
       try {
         if (cancelled()) return 'cancelled';
@@ -2985,6 +2994,7 @@
         await skjSleep(1200);
         if (cancelled()) return 'cancelled';
         if (!submit) return 'saved';
+        if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return 'cancelled';
 
         // 2) 提交
         const submitBtn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
@@ -3226,6 +3236,7 @@
           AppState.log('存在未完成题目，已暂存答案，请手动核对后提交', 'warn');
           return;
         }
+        if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return;
         const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
         if (!completeBtn) return;
         skjHumanClick(completeBtn);
@@ -3803,10 +3814,10 @@
         if (!isDragging) return;
         isDragging = false;
         widget.style.transition = '';
-        Storage.set('panelPosition', {
+        setConfig({ panelPosition: {
           top: parseInt(widget.style.top, 10),
           right: parseInt(widget.style.right, 10)
-        });
+        } });
       });
     }
 
@@ -4042,7 +4053,7 @@
         const el = document.getElementById(id);
         if (el) {
           el.addEventListener('change', () => {
-            this.saveGeneralSettings();
+            this.saveGeneralSettings(id.replace('skj-cfg-', ''));
           });
         }
       });
@@ -4082,7 +4093,7 @@
     /**
      * 保存常规开关与选择设置（实时自动保存）
      */
-    saveGeneralSettings() {
+    saveGeneralSettings(changedKey = null) {
       const rateEl = document.getElementById('skj-cfg-playbackRate');
       const newCfg = {
         videoEnabled: document.getElementById('skj-cfg-videoEnabled')?.checked ?? true,
@@ -4095,12 +4106,15 @@
         examEnabled: document.getElementById('skj-cfg-examEnabled')?.checked ?? true,
         autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? true
       };
-      setConfig(newCfg);
+      // 只保存用户本次修改的字段，避免旧面板覆盖其它标签页保存的选项。
+      setConfig(changedKey ? { [changedKey]: newCfg[changedKey] } : newCfg);
+      Object.assign(newCfg, getConfig());
+      this.videoAssist.optionsChanged?.();
 
       // 立即向当前页面所有视频同步新设定的倍速和静音状态
       const videos = this.videoAssist.findMediaElements();
       for (const v of videos) {
-        if (newCfg.muted && !v.muted) v.muted = true;
+        v.muted = !!newCfg.muted;
         this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
       }
 

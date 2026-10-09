@@ -24,6 +24,7 @@ class CxCourseRunner {
     this.drainRetry = 0;
     this.jumpLock = 0;
     this.failCount = 0;
+    this.blockedQuizKey = '';
     this.warnedIds = new Set();
   }
 
@@ -40,6 +41,7 @@ class CxCourseRunner {
     this.drainRetry = 0;
     this.jumpLock = 0;
     this.failCount = 0;
+    this.blockedQuizKey = '';
   }
 
   /** 取消当前任务，但保留当前队列/路由，供手动强制跳转使用 */
@@ -49,7 +51,11 @@ class CxCourseRunner {
 
   /** 主流循环调用：返回 true 表示本 tick 已由超星逻辑接管 */
   async tick(config) {
-    if (this.tickPromise) return this.tickPromise;
+    if (this.tickPromise) {
+      const route = CxDom.routeInfo();
+      if (route && this.routeKey && route.key !== this.routeKey) this.cancelCurrent();
+      return this.tickPromise;
+    }
     const promise = this.runTick(config);
     this.tickPromise = promise;
     try {
@@ -267,6 +273,12 @@ class CxCourseRunner {
       if (this.epoch !== epoch) return 'paused';
       const liveConfig = getConfig();
       if (!liveConfig.videoEnabled) return 'paused';
+      const quizKey = `${this.routeKey}|${task.id || task.src || kind}`;
+      if (this.blockedQuizKey === quizKey) {
+        if (CxDom.isVideoQuizVisible(iframe)) return 'paused';
+        this.blockedQuizKey = '';
+        quizTries = 0;
+      }
 
       // 平台可能重建任务点框架，此时需要重新解析框架与媒体元素
       if (!iframe.isConnected) {
@@ -308,6 +320,7 @@ class CxCourseRunner {
         if (r === 'retry') {
           quizTries += 1;
           if (quizTries >= 3) {
+            this.blockedQuizKey = quizKey;
             AppState.log('视频弹题连续答错 3 次，已暂停当前任务，请手动处理后再继续', 'warn');
             return 'paused';
           }

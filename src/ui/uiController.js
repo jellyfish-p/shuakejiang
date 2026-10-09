@@ -83,10 +83,10 @@ class UIController {
       if (!isDragging) return;
       isDragging = false;
       widget.style.transition = '';
-      Storage.set('panelPosition', {
+      setConfig({ panelPosition: {
         top: parseInt(widget.style.top, 10),
         right: parseInt(widget.style.right, 10)
-      });
+      } });
     });
   }
 
@@ -322,7 +322,7 @@ class UIController {
       const el = document.getElementById(id);
       if (el) {
         el.addEventListener('change', () => {
-          this.saveGeneralSettings();
+          this.saveGeneralSettings(id.replace('skj-cfg-', ''));
         });
       }
     });
@@ -362,7 +362,7 @@ class UIController {
   /**
    * 保存常规开关与选择设置（实时自动保存）
    */
-  saveGeneralSettings() {
+  saveGeneralSettings(changedKey = null) {
     const rateEl = document.getElementById('skj-cfg-playbackRate');
     const newCfg = {
       videoEnabled: document.getElementById('skj-cfg-videoEnabled')?.checked ?? true,
@@ -375,12 +375,15 @@ class UIController {
       examEnabled: document.getElementById('skj-cfg-examEnabled')?.checked ?? true,
       autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? true
     };
-    setConfig(newCfg);
+    // 只保存用户本次修改的字段，避免旧面板覆盖其它标签页保存的选项。
+    setConfig(changedKey ? { [changedKey]: newCfg[changedKey] } : newCfg);
+    Object.assign(newCfg, getConfig());
+    this.videoAssist.optionsChanged?.();
 
     // 立即向当前页面所有视频同步新设定的倍速和静音状态
     const videos = this.videoAssist.findMediaElements();
     for (const v of videos) {
-      if (newCfg.muted && !v.muted) v.muted = true;
+      v.muted = !!newCfg.muted;
       this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
     }
 

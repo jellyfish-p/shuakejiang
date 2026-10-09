@@ -79,7 +79,7 @@ function requestOpenAI(prompt, systemPrompt, config) {
           controller?.abort();
         } catch (e) {}
       }, 45000);
-      fetch(endpoint, {
+      const request = fetch(endpoint, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(body),
@@ -87,17 +87,21 @@ function requestOpenAI(prompt, systemPrompt, config) {
       })
         .then((r) => r.json())
         .then((data) => {
-          if (data.choices?.[0]?.message?.content) {
-            resolve(data.choices[0].message.content);
-          } else {
-            reject(new Error(data.error?.message || '请求失败'));
-          }
-        })
-        .catch((err) => {
-          if (controller?.signal?.aborted) reject(new Error('请求超时 (45s)，请检查 API 地址与网络连接'));
-          else reject(err);
-        })
-        .finally(() => clearTimeout(timeoutId));
+          if (data.choices?.[0]?.message?.content) return data.choices[0].message.content;
+          throw new Error(data.error?.message || '请求失败');
+        });
+      const timeout = new Promise((_, rejectTimeout) =>
+        setTimeout(() => rejectTimeout(new Error('请求超时 (45s)，请检查 API 地址与网络连接')), 45000)
+      );
+      Promise.race([request, timeout])
+        .then(resolve)
+        .catch((err) => reject(err))
+        .finally(() => {
+          clearTimeout(timeoutId);
+          try {
+            controller?.abort();
+          } catch (e) {}
+        });
     }
   });
 }
