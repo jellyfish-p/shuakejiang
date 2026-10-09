@@ -2310,8 +2310,12 @@
         dialog.dataset.skjQuizKey = key;
 
         const matched = options.filter((o) => o.sortUs && answers.includes(o.sortUs));
+        const lifecycle = this._lifecycle;
+        const href = location.href;
+        const stillCurrent = () => this.active && lifecycle === this._lifecycle && location.href === href;
         matched.forEach((opt, i) => {
           setTimeout(() => {
+            if (!stillCurrent()) return;
             try {
               vue.topicClickQot(opt);
             } catch (e) {}
@@ -2319,6 +2323,7 @@
         });
         setTimeout(
           () => {
+            if (!stillCurrent()) return;
             try {
               vue.testDialog = false;
             } catch (e) {}
