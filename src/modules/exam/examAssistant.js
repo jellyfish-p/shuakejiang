@@ -10,6 +10,7 @@ class ExamAssistant {
   constructor(videoAssist = null) {
     this.videoAssist = videoAssist;
     this.isBusy = false;
+    this.workPromise = null;
   }
 
   setVideoAssistant(videoAssist) {
@@ -84,7 +85,19 @@ class ExamAssistant {
    * 解答一个超星章节测验文档
    * @returns {{status:'done'|'failed', reason:string, submitSafe:boolean}}
    */
-  async solveCxWorkDoc(doc, config) {
+  async solveCxWorkDoc(doc, config, options = {}) {
+    if (this.workPromise) return this.workPromise;
+    const promise = this.runCxWorkDoc(doc, config, options);
+    this.workPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.workPromise === promise) this.workPromise = null;
+    }
+  }
+
+  async runCxWorkDoc(doc, config, options = {}) {
+    const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
     const status = CxDom.workStatus(doc);
     if (status === 'complete' || status === 'pendingReview' || status === 'teacherIncomplete') {
       AppState.log(`当前章节测验状态：${status}，无需作答`);
@@ -109,6 +122,9 @@ class ExamAssistant {
     let failed = 0;
 
     for (let i = 0; i < questions.length; i++) {
+      if (cancelled() || !getConfig().examEnabled) {
+        return { status: 'paused', reason: 'cancelled', submitSafe: false };
+      }
       const qEl = questions[i];
       AppState.setStatus(`正在解答章节测验 ${i + 1}/${questions.length}...`);
       try {
@@ -116,6 +132,9 @@ class ExamAssistant {
         const { stem, options, optEls } = this.extractCxQuestion(qEl, questionType);
         const prompt = buildQuestionPrompt(questionType, stem, options);
         const raw = await requestOpenAI(prompt, null, config);
+        if (cancelled() || !getConfig().examEnabled) {
+          return { status: 'paused', reason: 'cancelled', submitSafe: false };
+        }
         const answer = parseAnswerFromLLM(questionType, raw);
         AppState.log(`[测验 ${i + 1}/${questions.length}] ${questionType} → ${answer}`);
         const filled = this.fillCxQuestion(qEl, questionType, answer, optEls);
@@ -129,12 +148,20 @@ class ExamAssistant {
     }
 
     AppState.log(`章节测验作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
+    if (cancelled() || !getConfig().examEnabled) {
+      return { status: 'paused', reason: 'cancelled', submitSafe: false };
+    }
 
-    if (config.autoSubmit && failed === 0) {
-      const reason = await this.saveCxWork(doc, { submit: true });
+    const liveConfig = getConfig();
+    if (liveConfig.autoSubmit && failed === 0) {
+      const reason = await this.saveCxWork(doc, {
+        submit: true,
+        cancelled
+      });
+      if (reason === 'cancelled') return { status: 'paused', reason, submitSafe: false };
       return { status: 'done', reason, submitSafe: reason === 'submitted' };
     }
-    await this.saveCxWork(doc, { submit: false });
+    await this.saveCxWork(doc, { submit: false, cancelled });
     return {
       status: 'done',
       reason: failed ? `partial_saved(${failed}题未完成)` : 'saved',
@@ -360,7 +387,9 @@ class ExamAssistant {
    */
   async saveCxWork(doc, options = {}) {
     const submit = !!options.submit;
+    const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
     try {
+      if (cancelled()) return 'cancelled';
       // 1) 暂存答案
       const subBar = doc.querySelector('.ZY_sub.clearfix, .ZY_sub');
       if (subBar) skjHumanClick(subBar);
@@ -370,6 +399,7 @@ class ExamAssistant {
         AppState.log('已暂存章节测验答案');
       }
       await skjSleep(1200);
+      if (cancelled()) return 'cancelled';
       if (!submit) return 'saved';
 
       // 2) 提交
@@ -381,7 +411,11 @@ class ExamAssistant {
       skjHumanClick(submitBtn);
 
       // 3) 结果弹窗判定（对齐参考扩展：未做完 / 未达到及格线 自动取消）
-      const popup = await skjWaitFor(() => this.findVisiblePopup([doc]), { timeout: 8000, interval: 250 });
+      const popup = await skjWaitFor(() => this.findVisiblePopup([doc]), {
+        timeout: 8000,
+        interval: 250,
+        cancelled
+      });
       if (popup) {
         const content = this.readPopupContent([doc]);
         if (content.includes('未做完')) {
@@ -398,7 +432,11 @@ class ExamAssistant {
         AppState.log('已自动确认提交章节测验');
 
         // 3.1 二级结果弹窗（#workpopFocus）：未达到及格线时同样取消提交
-        const focusPopup = await skjWaitFor(() => this.findFocusPopup([doc]), { timeout: 6000, interval: 300 });
+        const focusPopup = await skjWaitFor(() => this.findFocusPopup([doc]), {
+          timeout: 6000,
+          interval: 300,
+          cancelled
+        });
         if (focusPopup) {
           const focusText = this.readPopupContent([doc]);
           if (focusText.includes('未达到及格线')) {
@@ -417,8 +455,9 @@ class ExamAssistant {
         () =>
           CxDom.isWorkResultView(doc) ||
           ['complete', 'pendingReview', 'teacherIncomplete'].includes(CxDom.workStatus(doc)),
-        { timeout: 12000, interval: 500 }
+        { timeout: 12000, interval: 500, cancelled }
       );
+      if (cancelled()) return 'cancelled';
       return verified ? 'submitted' : 'submitted_unverified';
     } catch (err) {
       AppState.log('暂存/提交异常: ' + err.message, 'error');
@@ -462,6 +501,10 @@ class ExamAssistant {
     let failed = 0;
 
     for (let i = 0; i < questions.length; i++) {
+      if (!getConfig().examEnabled) {
+        AppState.log('AI 解题助手已关闭，已停止继续处理作业/考试', 'warn');
+        return true;
+      }
       const qEl = questions[i];
       AppState.setStatus(`正在解答作业/考试 ${i + 1}/${questions.length}...`);
       try {
@@ -594,7 +637,7 @@ class ExamAssistant {
         skjHumanClick(tempSave);
         AppState.log('已点击【暂时保存】');
       }
-      if (!config.autoSubmit) return;
+      if (!getConfig().examEnabled || !getConfig().autoSubmit) return;
       if (failedCount > 0) {
         AppState.log('存在未完成题目，已暂存答案，请手动核对后提交', 'warn');
         return;
@@ -641,6 +684,10 @@ class ExamAssistant {
     let ok = 0;
     let failed = 0;
     for (let i = 0; i < items.length; i++) {
+      if (!getConfig().examEnabled) {
+        AppState.log('AI 解题助手已关闭，已停止继续处理智慧树题目', 'warn');
+        return true;
+      }
       const item = items[i];
       AppState.setStatus(`正在解答智慧树题目 ${i + 1}/${items.length}...`);
       try {
@@ -678,6 +725,7 @@ class ExamAssistant {
     }
 
     AppState.log(`智慧树作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
+    if (!getConfig().examEnabled) return true;
     const nextBtn = document.querySelector('.pre-next .next-t, .btn-next, .nextBtn');
     if (nextBtn && skjIsDisplayed(nextBtn)) {
       skjHumanClick(nextBtn);

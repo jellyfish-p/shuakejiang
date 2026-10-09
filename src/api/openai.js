@@ -72,11 +72,18 @@ function requestOpenAI(prompt, systemPrompt, config) {
         }
       });
     } else {
-      // 原生 fetch 降级处理
+      // 原生 fetch 降级处理：同样提供超时，避免请求永久占用任务队列
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeoutId = setTimeout(() => {
+        try {
+          controller?.abort();
+        } catch (e) {}
+      }, 45000);
       fetch(endpoint, {
         method: 'POST',
         headers: headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        ...(controller ? { signal: controller.signal } : {})
       })
         .then((r) => r.json())
         .then((data) => {
@@ -86,7 +93,11 @@ function requestOpenAI(prompt, systemPrompt, config) {
             reject(new Error(data.error?.message || '请求失败'));
           }
         })
-        .catch(reject);
+        .catch((err) => {
+          if (controller?.signal?.aborted) reject(new Error('请求超时 (45s)，请检查 API 地址与网络连接'));
+          else reject(err);
+        })
+        .finally(() => clearTimeout(timeoutId));
     }
   });
 }
