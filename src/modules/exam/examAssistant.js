@@ -39,11 +39,11 @@ class ExamAssistant {
     AppState.setStatus('正在解析页面题目...');
     try {
       if (Site.isChaoxing) {
-        if (await this.solveChaoxingWork(config)) return;
-        if (await this.solveChaoxingQuestionLiPage(config)) return;
+        if (await this.solveChaoxingWork(config, manual)) return;
+        if (await this.solveChaoxingQuestionLiPage(config, manual)) return;
       }
       if (Site.isZhihuishu) {
-        if (await this.solveZhihuishuExamPage(config)) return;
+        if (await this.solveZhihuishuExamPage(config, manual)) return;
       }
       AppState.log('当前页面未检测到可解答的题目', 'warn');
     } catch (err) {
@@ -61,10 +61,10 @@ class ExamAssistant {
 
   /** 学习页中的测验任务点（兼容旧接口名） */
   async solveChaoxingChapterTest(config) {
-    return this.solveChaoxingWork(config);
+    return this.solveChaoxingWork(config, false);
   }
 
-  async solveChaoxingWork(config) {
+  async solveChaoxingWork(config, allowDisabled = false) {
     if (!Site.isCxStudentStudy) return false;
     const studyDoc = CxDom.studyDoc();
     if (!studyDoc) return false;
@@ -77,7 +77,7 @@ class ExamAssistant {
 
     const doc = await skjWaitFor(() => CxDom.workDoc(iframe), { timeout: 20000, interval: 500 });
     if (!doc) return false;
-    await this.solveCxWorkDoc(doc, config);
+    await this.solveCxWorkDoc(doc, config, { allowDisabled });
     return true;
   }
 
@@ -98,6 +98,7 @@ class ExamAssistant {
 
   async runCxWorkDoc(doc, config, options = {}) {
     const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
+    const respectEnabled = !options.allowDisabled;
     const status = CxDom.workStatus(doc);
     if (status === 'complete' || status === 'pendingReview' || status === 'teacherIncomplete') {
       AppState.log(`当前章节测验状态：${status}，无需作答`);
@@ -122,7 +123,7 @@ class ExamAssistant {
     let failed = 0;
 
     for (let i = 0; i < questions.length; i++) {
-      if (cancelled() || !getConfig().examEnabled) {
+      if (cancelled() || (respectEnabled && !getConfig().examEnabled)) {
         return { status: 'paused', reason: 'cancelled', submitSafe: false };
       }
       const qEl = questions[i];
@@ -132,7 +133,7 @@ class ExamAssistant {
         const { stem, options, optEls } = this.extractCxQuestion(qEl, questionType);
         const prompt = buildQuestionPrompt(questionType, stem, options);
         const raw = await requestOpenAI(prompt, null, config);
-        if (cancelled() || !getConfig().examEnabled) {
+        if (cancelled() || (respectEnabled && !getConfig().examEnabled)) {
           return { status: 'paused', reason: 'cancelled', submitSafe: false };
         }
         const answer = parseAnswerFromLLM(questionType, raw);
@@ -148,7 +149,7 @@ class ExamAssistant {
     }
 
     AppState.log(`章节测验作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
-    if (cancelled() || !getConfig().examEnabled) {
+    if (cancelled() || (respectEnabled && !getConfig().examEnabled)) {
       return { status: 'paused', reason: 'cancelled', submitSafe: false };
     }
 
@@ -492,7 +493,7 @@ class ExamAssistant {
     return m ? m[1] : '单选题';
   }
 
-  async solveChaoxingQuestionLiPage(config) {
+  async solveChaoxingQuestionLiPage(config, allowDisabled = false) {
     const questions = Array.from(document.querySelectorAll('.questionLi'));
     if (!questions.length) return false;
 
@@ -501,7 +502,7 @@ class ExamAssistant {
     let failed = 0;
 
     for (let i = 0; i < questions.length; i++) {
-      if (!getConfig().examEnabled) {
+      if (!allowDisabled && !getConfig().examEnabled) {
         AppState.log('AI 解题助手已关闭，已停止继续处理作业/考试', 'warn');
         return true;
       }
@@ -531,7 +532,7 @@ class ExamAssistant {
     }
 
     AppState.log(`作业/考试作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
-    await this.saveQuestionLiPage(config, failed);
+    await this.saveQuestionLiPage(config, failed, allowDisabled);
     return true;
   }
 
@@ -630,14 +631,14 @@ class ExamAssistant {
   }
 
   /** 作业/考试页 暂存 + 提交（含弹窗校验） */
-  async saveQuestionLiPage(config, failedCount = 0) {
+  async saveQuestionLiPage(config, failedCount = 0, allowDisabled = false) {
     try {
       const tempSave = document.querySelector('#submitFocus a, .btnSave');
       if (tempSave && (tempSave.innerText || '').includes('暂')) {
         skjHumanClick(tempSave);
         AppState.log('已点击【暂时保存】');
       }
-      if (!getConfig().examEnabled || !getConfig().autoSubmit) return;
+      if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return;
       if (failedCount > 0) {
         AppState.log('存在未完成题目，已暂存答案，请手动核对后提交', 'warn');
         return;
@@ -672,7 +673,7 @@ class ExamAssistant {
    * 智慧树 作业 / 考试
    * =================================================================== */
 
-  async solveZhihuishuExamPage(config) {
+  async solveZhihuishuExamPage(config, allowDisabled = false) {
     const container = document.querySelector('.examPaper_box, .questionContent, .exam-test, .ET-content');
     if (!container) return false;
 
@@ -684,7 +685,7 @@ class ExamAssistant {
     let ok = 0;
     let failed = 0;
     for (let i = 0; i < items.length; i++) {
-      if (!getConfig().examEnabled) {
+      if (!allowDisabled && !getConfig().examEnabled) {
         AppState.log('AI 解题助手已关闭，已停止继续处理智慧树题目', 'warn');
         return true;
       }
@@ -725,7 +726,7 @@ class ExamAssistant {
     }
 
     AppState.log(`智慧树作答完成：成功 ${ok} 题${failed ? `，失败 ${failed} 题` : ''}`);
-    if (!getConfig().examEnabled) return true;
+    if (!allowDisabled && !getConfig().examEnabled) return true;
     const nextBtn = document.querySelector('.pre-next .next-t, .btn-next, .nextBtn');
     if (nextBtn && skjIsDisplayed(nextBtn)) {
       skjHumanClick(nextBtn);
