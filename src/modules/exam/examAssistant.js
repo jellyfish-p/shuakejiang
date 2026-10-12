@@ -72,10 +72,10 @@ class ExamAssistant {
     if (!tasks) return false;
     const workTask = tasks.find((t) => t.type === 'work');
     if (!workTask) return false;
-    const iframe = CxDom.taskIframeOf(studyDoc, workTask);
+    const iframe = await CxDom.resolveTaskIframe(studyDoc, workTask, 20000);
     if (!iframe) return false;
 
-    const doc = await skjWaitFor(() => CxDom.workDoc(iframe), { timeout: 20000, interval: 500 });
+    const doc = await skjWaitFor(() => CxDom.workDocReady(iframe), { timeout: 30000, interval: 500 });
     if (!doc) return false;
     await this.solveCxWorkDoc(doc, config, { allowDisabled });
     return true;

@@ -87,59 +87,50 @@ test('same-origin stranger cannot trigger cross-frame navigation', () => {
   assert.equal(va.isTrustedMediaMessage({ source: {}, origin: 'https://mooc1.chaoxing.com' }), false);
 });
 
-test('catalog reads rendered #coursetree state', () => {
-  const r = runtime();
-  const tree = r.node();
-  const marker = r.node();
-  marker.value = '{nextChapterId:200,unfinishCount:1}';
-  const active = r.node();
-  active.id = 'cur100';
-  const pending = r.node();
-  pending.id = 'cur200';
-  const count = r.node();
-  count.value = '2';
-  pending.select('.icon_Completed, .ans-job-finished', null);
-  pending.select('.jobUnfinishCount, .orangeNew', [count]);
-  tree.select('#_studystate', marker)
-    .select('.posCatalog_active[id^="cur"]', active)
-    .select('.posCatalog_select[id^="cur"]', [active, pending]);
-  r.document.select('#coursetree', tree);
+test('video completion keeps work task bound after frame reorder', async () => {
+  const r = runtime(), s = study(r);
+  const workSrc = 'https://mooc1.chaoxing.com/ananas/modules/work/index.html?work=2';
+  const workFrame = r.node();
+  workFrame.ownerDocument = s.studyDoc;
+  workFrame.attrs.src = workSrc;
+  const workOuter = r.doc(workSrc);
+  const workDoc = r.doc('https://mooc1.chaoxing.com/mooc-ans/work/content');
+  const workStatus = r.node('答题中');
+  workDoc
+    .select('.testTit_status, .ceyan_status', workStatus)
+    .select('#ZyBottom', r.node())
+    .select('#ZyBottom .singleQuesId', [r.node()]);
+  const contentFrame = r.node();
+  contentFrame.ownerDocument = workOuter;
+  contentFrame.contentDocument = workDoc;
+  contentFrame.attrs.src = 'https://mooc1.chaoxing.com/mooc-ans/work/content';
+  contentFrame.contentWindow = { document: workDoc };
+  workOuter.select('#frame_content', contentFrame);
+  workFrame.contentDocument = workOuter;
+  workFrame.contentWindow = { document: workOuter };
 
-  const state = new r.CxCatalogNavigator().readState();
-  assert.equal(state.currentChapterId, '100');
-  assert.equal(state.nextChapterId, '200');
-  assert.equal(state.entries.find((entry) => entry.id === '200').unfinished, true);
-});
-
-test('catalog prefers platform next unfinished chapter', () => {
-  const r = runtime();
-  const navigator = new r.CxCatalogNavigator();
-  navigator.readState = () => ({
-    currentChapterId: '1240950178',
-    nextChapterId: '1240950298',
-    unfinishCount: 64,
-    entries: []
-  });
-  const target = r.node();
-  navigator.findNode = () => target;
-  assert.equal(navigator.navigate({ autoNext: true, skipFinished: true }), 'navigating');
-  assert.equal(target.clicks, 1, 'native click should be dispatched');
-});
-
-test('catalog wraps to the first pending chapter when later entries are complete', () => {
-  const r = runtime();
-  const navigator = new r.CxCatalogNavigator();
-  const state = {
-    currentChapterId: '30',
-    nextChapterId: '30',
-    unfinishCount: 1,
-    entries: [
-      { id: '10', order: 0, unfinished: true, completed: false },
-      { id: '20', order: 1, unfinished: false, completed: true },
-      { id: '30', order: 2, unfinished: false, completed: false }
-    ]
+  // 视频完成后，平台可能重建任务 iframe 并改变顺序；索引 1 此时已不是 work。
+  const unrelated = r.node();
+  unrelated.ownerDocument = s.studyDoc;
+  unrelated.attrs.src = 'https://mooc1.chaoxing.com/ananas/modules/video/index.html?video=other';
+  s.studyDoc.select('iframe', [workFrame, unrelated]).select('iframe, frame', [workFrame, unrelated]);
+  r.setConfig({ openaiApiKey: 'test-only' });
+  let solvedDoc = null;
+  s.va.examAssist = {
+    solveCxWorkDoc: async (doc) => {
+      solvedDoc = doc;
+      return { status: 'done', reason: 'test', submitSafe: true };
+    }
   };
-  assert.equal(navigator.chooseTarget(state), '10');
+
+  const resultPromise = s.runner.execWork(
+    { id: 'work-2', type: 'work', iframeIndex: 1, src: workSrc },
+    r.getConfig()
+  );
+  await r.advance(26000);
+  const result = await resultPromise;
+  assert.equal(result, 'done', 'work task should run after video iframe order changes');
+  assert.equal(solvedDoc, workDoc, 'work task must resolve its own frame rather than stale index');
 });
 
 (async () => {

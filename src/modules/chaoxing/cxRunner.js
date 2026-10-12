@@ -26,7 +26,6 @@ class CxCourseRunner {
     this.failCount = 0;
     this.blockedQuizKey = '';
     this.warnedIds = new Set();
-    this.catalogNavigator = new CxCatalogNavigator();
   }
 
   reset() {
@@ -43,7 +42,6 @@ class CxCourseRunner {
     this.jumpLock = 0;
     this.failCount = 0;
     this.blockedQuizKey = '';
-    this.catalogNavigator.jumpLock = 0;
   }
 
   /** 取消当前任务，但保留当前队列/路由，供手动强制跳转使用 */
@@ -214,13 +212,17 @@ class CxCourseRunner {
 
   async execMedia(task, config, kind) {
     const epoch = this.epoch;
-    let iframe = CxDom.taskIframeOf(CxDom.studyDoc(), task);
+    let iframe = null;
 
     // 批注任务点需要先展开
     if (!iframe && task.source === 'blockquote') {
       iframe = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task, 8000, () => this.epoch !== epoch);
       if (this.epoch !== epoch) return 'paused';
       if (!iframe) return this.warnOnce(task, '批注任务点未展开出内容，已跳过', 'skipped');
+    }
+    if (!iframe) {
+      iframe = await CxDom.resolveTaskIframe(CxDom.studyDoc(), task, 25000, () => this.epoch !== epoch);
+      if (this.epoch !== epoch) return 'paused';
     }
     if (!iframe) return this.warnOnce(task, '未找到任务点内容框架，已跳过', 'skipped');
 
@@ -286,7 +288,13 @@ class CxCourseRunner {
       if (!iframe.isConnected) {
         lostFrames += 1;
         if (lostFrames >= 3) return this.warnOnce(task, '任务点框架已被平台重建，已跳过', 'skipped');
-        const again = CxDom.taskIframeOf(CxDom.studyDoc(), task);
+        const again = await CxDom.resolveTaskIframe(
+          CxDom.studyDoc(),
+          task,
+          5000,
+          () => this.epoch !== epoch
+        );
+        if (this.epoch !== epoch) return 'paused';
         if (!again) {
           await skjSleep(1000);
           continue;
@@ -464,13 +472,17 @@ class CxCourseRunner {
 
   async execWork(task, config) {
     const epoch = this.epoch;
-    const iframe = CxDom.taskIframeOf(CxDom.studyDoc(), task);
+    let iframe = null;
 
-    if (!iframe && task.source === 'blockquote') {
+    if (task.source === 'blockquote') {
       const fr = await CxDom.openBlockquoteTask(CxDom.studyDoc(), task, 8000, () => this.epoch !== epoch);
       if (this.epoch !== epoch) return 'paused';
       if (!fr) return this.warnOnce(task, '批注任务点未展开出内容，已跳过', 'skipped');
       return 'done';
+    }
+    if (!iframe) {
+      iframe = await CxDom.resolveTaskIframe(CxDom.studyDoc(), task, 25000, () => this.epoch !== epoch);
+      if (this.epoch !== epoch) return 'paused';
     }
     if (!iframe) return this.warnOnce(task, '未找到测验内容框架，已跳过', 'skipped');
 
@@ -479,8 +491,8 @@ class CxCourseRunner {
       return 'skipped';
     }
 
-    const doc = await skjWaitFor(() => CxDom.workDoc(iframe), {
-      timeout: 25000,
+    const doc = await skjWaitFor(() => CxDom.workDocReady(iframe), {
+      timeout: 30000,
       interval: 500,
       cancelled: () => this.epoch !== epoch
     });
@@ -589,16 +601,7 @@ class CxCourseRunner {
       return 'paused';
     }
 
-    // 目录节点带有平台原生 getTeacherAjax onclick。优先读取 #coursetree
-    // 的 _studystate.nextChapterId，跳过已完成章节并支持回头补漏。
-    const catalogResult = this.catalogNavigator.navigate(liveConfig);
-    if (catalogResult === 'navigating') {
-      this.drainRetry = 0;
-      this.jumpLock = Date.now() + 6000;
-      this.handleJobFinishTip(this.routeKey);
-      return;
-    }
-
+    // 仅沿当前页面提供的【下一节】入口向前推进，不读取课程目录补跳旧章节。
     const result = await this.goNext();
     if (result === 'navigating' || result === 'paused') {
       this.drainRetry = 0;

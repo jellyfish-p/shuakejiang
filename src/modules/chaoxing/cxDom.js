@@ -130,8 +130,12 @@ const CxDom = {
       if (!(src.includes('/ananas/modules/') || src.includes('/ananas/dialog/ballchart'))) return;
       const raw = this.rawTaskType(src);
       const type = this.resolveTaskType(raw);
+      let taskId = '';
+      try {
+        taskId = fr.getAttribute('data-dx-task-id') || '';
+      } catch (e) {}
       tasks.push({
-        id: `frame-${idx}`,
+        id: taskId || `frame-${idx}`,
         source: 'iframe',
         order: idx,
         iframeIndex: idx,
@@ -185,7 +189,7 @@ const CxDom = {
     return tasks;
   },
 
-  /** 根据任务描述解析出任务框架元素（优先索引，其次 src 匹配） */
+  /** 根据任务描述解析出任务框架元素（校验类型，避免平台重排后命中旧索引） */
   taskIframeOf(doc, task) {
     if (!doc || !task) return null;
     try {
@@ -196,22 +200,56 @@ const CxDom = {
         const wrap = wraps[task.blockIndex];
         return wrap?.querySelector('.cmd-autoblockquote iframe') || null;
       }
+
       const iframes = Array.from(doc.getElementsByTagName('iframe'));
-      if (typeof task.iframeIndex === 'number' && iframes[task.iframeIndex]) {
-        return iframes[task.iframeIndex];
+      const candidates = [];
+      const add = (frame) => {
+        if (frame && !candidates.includes(frame)) candidates.push(frame);
+      };
+      if (task.id) {
+        try {
+          add(doc.querySelector(`[data-dx-task-id="${String(task.id).replace(/"/g, '\\\\"')}"]`));
+        } catch (e) {}
       }
+      if (typeof task.iframeIndex === 'number') add(iframes[task.iframeIndex]);
+      if (typeof task.order === 'number') add(iframes[task.order]);
       if (task.src) {
-        return (
-          iframes.find((f) => {
-            const src = f.getAttribute('src') || f.src || '';
-            return src && (src === task.src || src.includes(task.src) || task.src.includes(src));
-          }) || null
-        );
+        iframes.forEach((frame) => {
+          const src = frame.getAttribute('src') || frame.src || '';
+          if (src && (src === task.src || src.includes(task.src) || task.src.includes(src))) add(frame);
+        });
       }
-      return null;
+
+      // 原插件会在索引、顺序、src 之间回退，但不会接受类型不一致的 iframe。
+      const expected = task.type && task.type !== 'text' ? String(task.type).toLowerCase() : '';
+      const matches = (frame) => {
+        if (!expected) return true;
+        const src = frame.getAttribute('src') || frame.src || '';
+        const raw = this.rawTaskType(src);
+        return (this.resolveTaskType(raw) || raw || '').toLowerCase() === expected;
+      };
+      return candidates.find(matches) || null;
     } catch (e) {
       return null;
     }
+  },
+
+  /** 等待任务框架出现；平台切换任务点时 iframe 可能短暂重建或重排 */
+  resolveTaskIframe(doc, task, timeout = 25000, cancelled = null) {
+    return skjWaitFor(
+      () => this.taskIframeOf(this.studyDoc() || doc, task),
+      { timeout, interval: 400, cancelled }
+    );
+  },
+
+  /** 等待章节测验的内层文档真正可作答 */
+  workDocReady(taskIframe) {
+    const doc = this.workDoc(taskIframe);
+    if (!doc) return null;
+    const status = this.workStatus(doc);
+    if (['complete', 'pendingReview', 'teacherIncomplete'].includes(status)) return doc;
+    if (this.countQuestions(doc) > 0) return doc;
+    return null;
   },
 
   /** 批注任务点：展开并等待框架出现 */
@@ -337,6 +375,8 @@ const CxDom = {
         if (text.includes('教师未创建完成该测验')) return 'teacherIncomplete';
         if (text.includes('待批阅')) return 'pendingReview';
         if (/已批阅|已完成|已提交/.test(text)) return 'complete';
+        // 参考插件以状态节点作为“测验已加载”的信号，不能在题目列表尚未填充时抢先跳走。
+        return 'active';
       }
       const title = doc.title || '';
       if (title.includes('查看已批阅作业') || title.includes('查看作业')) return 'pendingReview';

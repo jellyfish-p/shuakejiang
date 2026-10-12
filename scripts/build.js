@@ -20,7 +20,6 @@ const MODULE_FILES = [
   'modules/exam/parser.js',
   'core/site.js',
   'modules/chaoxing/cxDom.js',
-  'modules/chaoxing/cxCatalog.js',
   'modules/chaoxing/cxRunner.js',
   'modules/video/videoAssistant.js',
   'modules/exam/examAssistant.js',
