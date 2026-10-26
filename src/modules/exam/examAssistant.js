@@ -453,15 +453,22 @@ class ExamAssistant {
       if (!submit) return 'saved';
       if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return 'cancelled';
 
-      // 2) 提交
-      const submitBtn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
-      if (!submitBtn) {
-        AppState.log('未找到测验提交按钮，已保留暂存结果', 'warn');
-        return 'saved';
-      }
-      // 填答/暂存完成后稍等，给平台同步答案状态的时间，再点击提交。
+      // 2) 提交：先等待平台同步答案，再重新查找当前提交按钮。
+      // 超星可能在暂存/重绘时替换按钮，不能继续点击旧节点，否则确认弹窗不会出现。
       await skjSleep(500);
       if (!canSubmit()) return 'cancelled';
+      const submitBtn = await skjWaitFor(
+        () => {
+          const btn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
+          return btn && skjIsDisplayed(btn) ? btn : null;
+        },
+        { timeout: 3000, interval: 200, cancelled: () => !canSubmit() }
+      );
+      if (!canSubmit()) return 'cancelled';
+      if (!submitBtn) {
+        AppState.log('未找到当前测验提交按钮，已保留暂存结果', 'warn');
+        return 'saved';
+      }
       if (!skjHumanClick(submitBtn)) return 'error';
 
       // 3) 结果弹窗判定（对齐参考扩展：未做完 / 未达到及格线 自动取消）
@@ -666,11 +673,17 @@ class ExamAssistant {
         return;
       }
       if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return;
-      const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
-      if (!completeBtn) return;
-      // 填答/暂存完成后稍等，给独立作业页同步答案状态的时间，再点击提交。
+      // 填答/暂存完成后稍等，给平台同步答案，再重新查找当前提交按钮。
       await skjSleep(500);
       if (!canSubmit()) return;
+      const completeBtn = await skjWaitFor(
+        () => {
+          const btn = document.querySelector('a.completeBtn, .btnSubmit');
+          return btn && skjIsDisplayed(btn) ? btn : null;
+        },
+        { timeout: 3000, interval: 200, cancelled: () => !canSubmit() }
+      );
+      if (!canSubmit() || !completeBtn) return;
       skjHumanClick(completeBtn);
       const popup = await skjWaitFor(() => this.findVisiblePopup(), { timeout: 8000, interval: 250, cancelled: () => !canSubmit() });
       if (!canSubmit()) return;

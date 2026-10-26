@@ -234,6 +234,23 @@ test('filled chapter waits 500ms after saving before clicking submit', async () 
   assert.equal(await pending, 'submitted');
 });
 
+test('re-queries a redrawn chapter submit button before triggering the confirmation popup', async () => {
+  const r = runtime(), d = r.doc(), ea = new r.ExamAssistant(), ui = submission(r, d);
+  const replacement = r.node(); replacement.ownerDocument = d;
+  ui.save.addEventListener('click', () => {
+    r.sandbox.setTimeout(() => {
+      d.select('.btnSubmit.workBtnIndex, .btnSubmit', replacement);
+      replacement.addEventListener('click', () => d.select('#workpop', ui.popup));
+    }, 1300);
+  });
+  const pending = ea.saveCxWork(d, { submit: true });
+  await r.advance(30000);
+  assert.equal(await pending, 'submitted');
+  assert.equal(ui.submit.clicks, 0, 'the stale submit button must not be clicked');
+  assert.equal(replacement.clicks, 1, 'the live submit button must trigger the popup');
+  assert.equal(ui.confirm.clicks, 1);
+});
+
 test('submission click preserves javascript href used by Chaoxing action links', async () => {
   const r = runtime(), ea = new r.ExamAssistant(), d = r.doc(), submit = r.node();
   submit.ownerDocument = d; submit.attrs.href = 'javascript:submitCheck();';
@@ -274,7 +291,7 @@ test('valid batch fills all choices before saving and confirming submission', as
   assert.equal(result.reason, 'submitted'); assert.equal(result.submitSafe, true);
 });
 
-for (const refresh of ['cache', 'relative', 'query-order']) {
+for (const refresh of ['cache', 'relative', 'query-order', 'runtime-noise']) {
   test(`chapter submission ${refresh} refresh continues without rescanning completed tasks`, async () => {
     const r = runtime(), s = chapter(r, 1), ui = submission(r, s.d);
     r.setConfig({ autoSubmit: true });
@@ -293,6 +310,11 @@ for (const refresh of ['cache', 'relative', 'query-order']) {
     r.document.select('#iframe', main).select('iframe, frame', [main]);
     const next = r.node(); next.ownerDocument = r.document;
     r.document.select('#prevNextFocusNext', next);
+    // A platform redraw can add a runtime/version parameter after saving answers.
+    if (refresh === 'runtime-noise') ui.save.addEventListener('click', () => {
+      studyDoc.URL = cardsUrl + '&v=runtime-refresh';
+      main.attrs.src = studyDoc.URL;
+    });
     // Keep submission pending across scheduler ticks while the same cards URL changes.
     ui.confirm.addEventListener('click', () => {
       if (refresh === 'cache') {

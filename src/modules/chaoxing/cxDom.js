@@ -72,9 +72,10 @@ const CxDom = {
     if (!href) return '';
     try {
       const url = new URL(href, base);
-      // 只忽略 cards 页的缓存参数，保留章节、任务卡、课程及其他业务参数。
+      // 只忽略 cards 页的缓存/版本参数，保留章节、任务卡、课程及其他业务参数。
+      // 超星重绘当前题目后可能改写 v；这不是切章，不应取消正在提交的任务。
       if (/\/knowledge\/cards\/?$/.test(url.pathname)) {
-        for (const name of ['_dc', '_t', '_']) url.searchParams.delete(name);
+        for (const name of ['_dc', '_t', '_', 'v']) url.searchParams.delete(name);
       }
       url.searchParams.sort();
       return url.href;

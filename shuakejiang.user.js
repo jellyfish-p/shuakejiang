@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         刷课酱 - 网课视频助手 & AI 解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.2.2
+// @version      2.2.3
 // @description  刷课酱 - 超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；按当前页面任务点队列依次推进，视频结束后继续处理章节测验，不回头跳转旧章节，全部完成后自动停止；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
@@ -22386,9 +22386,10 @@
       if (!href) return '';
       try {
         const url = new URL(href, base);
-        // 只忽略 cards 页的缓存参数，保留章节、任务卡、课程及其他业务参数。
+        // 只忽略 cards 页的缓存/版本参数，保留章节、任务卡、课程及其他业务参数。
+        // 超星重绘当前题目后可能改写 v；这不是切章，不应取消正在提交的任务。
         if (/\/knowledge\/cards\/?$/.test(url.pathname)) {
-          for (const name of ['_dc', '_t', '_']) url.searchParams.delete(name);
+          for (const name of ['_dc', '_t', '_', 'v']) url.searchParams.delete(name);
         }
         url.searchParams.sort();
         return url.href;
@@ -24782,15 +24783,22 @@
         if (!submit) return 'saved';
         if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return 'cancelled';
 
-        // 2) 提交
-        const submitBtn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
-        if (!submitBtn) {
-          AppState.log('未找到测验提交按钮，已保留暂存结果', 'warn');
-          return 'saved';
-        }
-        // 填答/暂存完成后稍等，给平台同步答案状态的时间，再点击提交。
+        // 2) 提交：先等待平台同步答案，再重新查找当前提交按钮。
+        // 超星可能在暂存/重绘时替换按钮，不能继续点击旧节点，否则确认弹窗不会出现。
         await skjSleep(500);
         if (!canSubmit()) return 'cancelled';
+        const submitBtn = await skjWaitFor(
+          () => {
+            const btn = doc.querySelector('.btnSubmit.workBtnIndex, .btnSubmit');
+            return btn && skjIsDisplayed(btn) ? btn : null;
+          },
+          { timeout: 3000, interval: 200, cancelled: () => !canSubmit() }
+        );
+        if (!canSubmit()) return 'cancelled';
+        if (!submitBtn) {
+          AppState.log('未找到当前测验提交按钮，已保留暂存结果', 'warn');
+          return 'saved';
+        }
         if (!skjHumanClick(submitBtn)) return 'error';
 
         // 3) 结果弹窗判定（对齐参考扩展：未做完 / 未达到及格线 自动取消）
@@ -24995,11 +25003,17 @@
           return;
         }
         if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return;
-        const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
-        if (!completeBtn) return;
-        // 填答/暂存完成后稍等，给独立作业页同步答案状态的时间，再点击提交。
+        // 填答/暂存完成后稍等，给平台同步答案，再重新查找当前提交按钮。
         await skjSleep(500);
         if (!canSubmit()) return;
+        const completeBtn = await skjWaitFor(
+          () => {
+            const btn = document.querySelector('a.completeBtn, .btnSubmit');
+            return btn && skjIsDisplayed(btn) ? btn : null;
+          },
+          { timeout: 3000, interval: 200, cancelled: () => !canSubmit() }
+        );
+        if (!canSubmit() || !completeBtn) return;
         skjHumanClick(completeBtn);
         const popup = await skjWaitFor(() => this.findVisiblePopup(), { timeout: 8000, interval: 250, cancelled: () => !canSubmit() });
         if (!canSubmit()) return;
@@ -25602,7 +25616,7 @@
           <div class="skj-header">
             <div class="skj-header-title">
               <span>🤖 刷课酱控制台</span>
-              <span class="skj-badge">v2.2.2</span>
+              <span class="skj-badge">v2.2.3</span>
             </div>
             <button class="skj-close" id="skj-close-btn">&times;</button>
           </div>

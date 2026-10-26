@@ -40,7 +40,7 @@ test('cards refresh keys preserve business parameters and real route changes', (
   const cardsUrl = 'https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?courseid=course-1&clazzid=class-1&knowledgeid=chapter-1&num=0&cardid=card-1';
   s.main.attrs.src = cardsUrl; s.studyDoc.URL = cardsUrl;
   const initialKey = r.CxDom.routeInfo().key;
-  for (const cache of ['_dc', '_t', '_']) {
+  for (const cache of ['_dc', '_t', '_', 'v']) {
     s.main.attrs.src = cardsUrl + `&${cache}=200000`;
     s.studyDoc.URL = cardsUrl + `&${cache}=300000`;
     assert.equal(r.CxDom.routeInfo().key, initialKey, `${cache} must not reset the queue`);
