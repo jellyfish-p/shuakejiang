@@ -403,45 +403,44 @@ class VideoAssistant {
     }
 
     box.dataset.skjSolving = '1';
+    const stopped = () => {
+      const live = getConfig();
+      const keys = ['cxFontStrategy', 'cxVisionUseMain', 'cxVisionBaseUrl', 'cxVisionApiKey', 'cxVisionModel',
+        'openaiBaseUrl', 'openaiApiKey', 'openaiModel'];
+      return taskIframe.isConnected === false || taskIframe.contentDocument !== doc || box.isConnected === false ||
+        !live.videoEnabled || !live.autoSolveVideoQuiz ||
+        keys.some(key => (live[key] ?? DEFAULT_CONFIG[key]) !== (config[key] ?? DEFAULT_CONFIG[key]));
+    };
     try {
-      const typeTitle = doc.querySelector('.tkTopic_title')?.innerText || '';
+      const titleEl = doc.querySelector('.tkTopic_title');
+      const reader = await CxFont.prepare([box, titleEl].filter(Boolean), config, { cancelled: stopped });
+      const typeTitle = reader.readText(titleEl);
       const questionType = /多选/.test(typeTitle)
         ? '多选题'
         : /判断/.test(typeTitle)
           ? '判断题'
           : '单选题';
-      const stem = (doc.querySelector('.ans-videoquiz .tkTopic')?.innerText || box.innerText || '')
+      const stem = reader.readText(doc.querySelector('.ans-videoquiz .tkTopic') || box)
         .replace(/\s+/g, ' ')
         .trim();
       const optEls = Array.from(doc.querySelectorAll('.ans-videoquiz-opt'));
-      const options = optEls.map((el) => el.innerText.trim());
+      const options = optEls.map((el) => reader.readText(el).trim());
       if (!optEls.length) return 'none';
 
-      let prompt = buildQuestionPrompt(questionType, stem, options);
-      if (attempt > 0) {
-        prompt += '\n【注意】上一次提交的答案被平台判定为错误，请重新仔细分析题目，务必给出正确的答案！';
+      const note = attempt > 0 ? '上一次提交的答案被平台判定为错误，请重新仔细分析题目。' : '';
+      const answers = await requestQuestionBatch([{ id: 'q1', type: questionType, title: stem, options }], config, note);
+      if (stopped()) return 'none';
+      reader.assertCurrent();
+      const answer = answers.get('q1');
+      if (!answer || !skjFillChoice(optEls, questionType, answer, options)) {
+        AppState.log('视频弹题答案无效或选中状态校验失败，未提交', 'warn');
+        return 'failed';
       }
-      const raw = await requestOpenAI(prompt, null, config);
-      const answer = parseAnswerFromLLM(questionType, raw);
       AppState.log(`视频随堂弹题（${questionType}）AI 答案：${answer}`);
 
-      if (questionType === '多选题') {
-        optEls.forEach((el) => {
-          const letter = skjLeadingLetter(el.innerText);
-          const input = el.querySelector('input');
-          const checked = !!(input && input.checked);
-          const should = !!letter && String(answer).includes(letter);
-          if (should !== checked) skjHumanClick(input || el);
-        });
-      } else {
-        const target =
-          optEls.find((el) => skjOptionMatches(el.innerText, answer)) || optEls[0];
-        const input = target?.querySelector('input');
-        if (input && !input.checked) skjHumanClick(input);
-        else if (target) skjHumanClick(target);
-      }
-
       await skjSleep(800);
+      if (stopped()) return 'none';
+      reader.assertCurrent();
       const freshSubmit = doc.getElementById('videoquiz-submit');
       if (freshSubmit && skjIsDisplayed(freshSubmit)) skjHumanClick(freshSubmit);
       await skjSleep(2000);

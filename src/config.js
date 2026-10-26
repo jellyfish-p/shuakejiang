@@ -59,6 +59,11 @@ const DEFAULT_CONFIG = {
   openaiApiKey: '',
   openaiModel: 'deepseek-flash',
   openaiTemperature: 0.1,
+  cxFontStrategy: 'table', // 超星字体混淆：手动选择查表或图片视觉，不自动回退
+  cxVisionUseMain: true,
+  cxVisionBaseUrl: '',
+  cxVisionApiKey: '',
+  cxVisionModel: '',
   autoSubmit: true, // 默认开启做题自动提交
   solveInterval: 2000, // 每题间隔（毫秒）
 

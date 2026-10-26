@@ -1,8 +1,7 @@
-# Decompiled & unpacked binary assets
-extension.crx
-extension.zip
-extracted/
-beautified/
+# Original extension snapshots (local only; reference READMEs stay tracked)
+/reference/original-extension/*/packages/
+/reference/original-extension/*/extracted/
+/reference/original-extension/*/beautified/
 
 # Node & dependencies
 node_modules/
@@ -15,3 +14,6 @@ yarn-error.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Local page captures and their assets (may contain private course data)
+/reference/page-samples/*/

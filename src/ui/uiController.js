@@ -95,13 +95,16 @@ class UIController {
     modal.id = 'skj-modal';
 
     const cfg = getConfig();
+    const escapeAttribute = (value) => skjEscapeHtml(value).replace(/"/g, '&quot;');
+    const visionEnabled = cfg.cxFontStrategy === 'vision';
+    const independentVision = visionEnabled && cfg.cxVisionUseMain === false;
 
     modal.innerHTML = `
       <div class="skj-dialog">
         <div class="skj-header">
           <div class="skj-header-title">
             <span>🤖 刷课酱控制台</span>
-            <span class="skj-badge">v2.1.1</span>
+            <span class="skj-badge">v2.2.0</span>
           </div>
           <button class="skj-close" id="skj-close-btn">&times;</button>
         </div>
@@ -242,22 +245,60 @@ class UIController {
 
             <div class="skj-form-item">
               <div class="skj-form-label">API 接口地址 (Base URL)</div>
-              <input type="text" class="skj-input" id="skj-cfg-openaiBaseUrl" placeholder="https://api.openai.com/v1" value="${cfg.openaiBaseUrl}">
+              <input type="text" class="skj-input" id="skj-cfg-openaiBaseUrl" placeholder="https://api.openai.com/v1" value="${escapeAttribute(cfg.openaiBaseUrl)}">
               <div class="skj-form-desc">支持任意 OpenAI 兼容地址，例如 DeepSeek、OneAPI、SiliconFlow 或本地 Ollama</div>
             </div>
 
             <div class="skj-form-item">
               <div class="skj-form-label">API Key (密钥)</div>
-              <input type="password" class="skj-input" id="skj-cfg-openaiApiKey" placeholder="sk-..." value="${cfg.openaiApiKey}">
-              <div class="skj-form-desc">密钥仅保存在您本地油猴脚本存储中，跨网站全局共享，绝不上传至任何第三方服务器</div>
+              <input type="password" class="skj-input" id="skj-cfg-openaiApiKey" placeholder="sk-..." value="${escapeAttribute(cfg.openaiApiKey)}">
+              <div class="skj-form-desc">密钥保存在本地配置中；调用时仅发送给您配置的对应 API 地址，请勿使用不可信接口</div>
             </div>
 
             <div class="skj-form-item">
               <div class="skj-form-label">模型名称 (Model)</div>
-              <input type="text" class="skj-input" id="skj-cfg-openaiModel" placeholder="gpt-4o-mini" value="${cfg.openaiModel}">
+              <input type="text" class="skj-input" id="skj-cfg-openaiModel" placeholder="gpt-4o-mini" value="${escapeAttribute(cfg.openaiModel)}">
               <div class="skj-form-desc">例如：gpt-4o-mini、deepseek-chat、qwen-turbo、claude-3-haiku 等</div>
             </div>
 
+            <div class="skj-form-item">
+              <div class="skj-form-label">超星字体混淆处理策略（自动保存）</div>
+              <select class="skj-input" id="skj-cfg-cxFontStrategy">
+                <option value="table" ${!visionEnabled ? 'selected' : ''}>查现有指纹表（默认）</option>
+                <option value="vision" ${visionEnabled ? 'selected' : ''}>图片视觉识别</option>
+              </select>
+              <div class="skj-form-desc">手动选择一种策略，不自动回退。非混淆题继续走原有解题流程。</div>
+              <div class="skj-form-desc">仅图片视觉会向所配置的 API 上传混淆区域用到的编号汉字图片；识字后仍由主模型按原有批请求解题。识别失败不会自动提交；视觉转写仍可能误认汉字，建议关闭自动提交后核对。</div>
+            </div>
+
+            <div id="skj-cx-vision-settings" ${visionEnabled ? '' : 'hidden'}>
+              <div class="skj-form-item">
+                <div class="skj-form-label">视觉 API 来源（自动保存）</div>
+                <select class="skj-input" id="skj-cfg-cxVisionUseMain">
+                  <option value="true" ${cfg.cxVisionUseMain !== false ? 'selected' : ''}>复用主解题模型</option>
+                  <option value="false" ${cfg.cxVisionUseMain === false ? 'selected' : ''}>独立视觉 API</option>
+                </select>
+                <div class="skj-form-desc">复用时主解题模型必须支持图片；独立模式的视觉模型也必须支持图片。两套 API 不会自动回退或混用。</div>
+              </div>
+
+              <div id="skj-cx-vision-independent" ${independentVision ? '' : 'hidden'}>
+                <div class="skj-form-item">
+                  <div class="skj-form-label">独立视觉 Base URL（需手动保存）</div>
+                  <input type="text" class="skj-input" id="skj-cfg-cxVisionBaseUrl" placeholder="https://api.openai.com/v1" value="${escapeAttribute(cfg.cxVisionBaseUrl)}" ${independentVision ? '' : 'disabled'}>
+                </div>
+                <div class="skj-form-item">
+                  <div class="skj-form-label">独立视觉 API Key（需手动保存）</div>
+                  <input type="password" class="skj-input" id="skj-cfg-cxVisionApiKey" placeholder="sk-..." value="${escapeAttribute(cfg.cxVisionApiKey)}" ${independentVision ? '' : 'disabled'}>
+                </div>
+                <div class="skj-form-item">
+                  <div class="skj-form-label">独立视觉 Model（需手动保存）</div>
+                  <input type="text" class="skj-input" id="skj-cfg-cxVisionModel" placeholder="支持图片的模型名称" value="${escapeAttribute(cfg.cxVisionModel)}" ${independentVision ? '' : 'disabled'}>
+                  <div class="skj-form-desc">三个独立参数必须全部填写，再点击下方保存。切换或隐藏此区域不会清空已保存的独立配置。</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="skj-form-desc">连接测试仅检查主解题 API 的文本响应，不验证模型的图片识别能力。</div>
             <div style="display: flex; gap: 10px; margin-top: 16px;">
               <button class="skj-btn skj-btn-secondary" id="skj-test-ai-btn">⚡ 测试 API 连接</button>
               <button class="skj-btn skj-btn-primary" id="skj-save-api-btn">💾 保存 API 配置</button>
@@ -315,7 +356,9 @@ class UIController {
       'skj-cfg-autoSolveVideoQuiz',
       'skj-cfg-playbackRate',
       'skj-cfg-examEnabled',
-      'skj-cfg-autoSubmit'
+      'skj-cfg-autoSubmit',
+      'skj-cfg-cxFontStrategy',
+      'skj-cfg-cxVisionUseMain'
     ];
 
     autoSaveSelectAndSwitches.forEach((id) => {
@@ -326,6 +369,8 @@ class UIController {
         });
       }
     });
+
+    this.updateCxVisionSettings();
 
     // 测试 API
     document.getElementById('skj-test-ai-btn')?.addEventListener('click', async () => {
@@ -364,6 +409,9 @@ class UIController {
    */
   saveGeneralSettings(changedKey = null) {
     const rateEl = document.getElementById('skj-cfg-playbackRate');
+    const cfg = getConfig();
+    const strategyEl = document.getElementById('skj-cfg-cxFontStrategy');
+    const visionSourceEl = document.getElementById('skj-cfg-cxVisionUseMain');
     const newCfg = {
       videoEnabled: document.getElementById('skj-cfg-videoEnabled')?.checked ?? true,
       autoNext: document.getElementById('skj-cfg-autoNext')?.checked ?? true,
@@ -373,11 +421,14 @@ class UIController {
       playbackRate: parseFloat(rateEl?.value || '1.0'),
 
       examEnabled: document.getElementById('skj-cfg-examEnabled')?.checked ?? true,
-      autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? true
+      autoSubmit: document.getElementById('skj-cfg-autoSubmit')?.checked ?? true,
+      cxFontStrategy: strategyEl ? (strategyEl.value === 'vision' ? 'vision' : 'table') : cfg.cxFontStrategy,
+      cxVisionUseMain: visionSourceEl ? visionSourceEl.value !== 'false' : cfg.cxVisionUseMain
     };
     // 只保存用户本次修改的字段，避免旧面板覆盖其它标签页保存的选项。
     setConfig(changedKey ? { [changedKey]: newCfg[changedKey] } : newCfg);
     Object.assign(newCfg, getConfig());
+    this.updateCxVisionSettings();
     this.videoAssist.optionsChanged?.();
 
     // 立即向当前页面所有视频同步新设定的倍速和静音状态
@@ -390,6 +441,23 @@ class UIController {
     this.showSaveTip('✅ 设置已实时自动保存并生效');
   }
 
+  // 只切换可见性与可编辑性，保留输入中的草稿以及已保存的独立配置。
+  updateCxVisionSettings() {
+    const cfg = getConfig();
+    const strategy = document.getElementById('skj-cfg-cxFontStrategy')?.value ?? cfg.cxFontStrategy;
+    const source = document.getElementById('skj-cfg-cxVisionUseMain')?.value ?? String(cfg.cxVisionUseMain);
+    const visionEnabled = strategy === 'vision';
+    const independentVision = visionEnabled && source === 'false';
+    const settings = document.getElementById('skj-cx-vision-settings');
+    const independent = document.getElementById('skj-cx-vision-independent');
+    if (settings) settings.hidden = !visionEnabled;
+    if (independent) independent.hidden = !independentVision;
+    for (const key of ['cxVisionBaseUrl', 'cxVisionApiKey', 'cxVisionModel']) {
+      const input = document.getElementById('skj-cfg-' + key);
+      if (input) input.disabled = !independentVision;
+    }
+  }
+
   /**
    * 保存大模型 API 接口配置（用户手动点击保存）
    */
@@ -398,11 +466,17 @@ class UIController {
     const inputApiKey = document.getElementById('skj-cfg-openaiApiKey')?.value.trim() || '';
     const inputModel = document.getElementById('skj-cfg-openaiModel')?.value.trim() || 'gpt-4o-mini';
 
-    setConfig({
+    const patch = {
       openaiBaseUrl: inputBaseUrl,
       openaiApiKey: inputApiKey,
       openaiModel: inputModel
-    });
+    };
+    for (const key of ['cxVisionBaseUrl', 'cxVisionApiKey', 'cxVisionModel']) {
+      const input = document.getElementById('skj-cfg-' + key);
+      // 隐藏/禁用字段不参与保存，避免旧面板或空输入覆盖其它标签页的独立配置。
+      if (input && !input.disabled) patch[key] = input.value.trim();
+    }
+    setConfig(patch);
 
     this.showSaveTip('✅ API 配置已成功保存！');
     if (!silent) {

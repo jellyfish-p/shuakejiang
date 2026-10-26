@@ -412,7 +412,7 @@ const CxDom = {
     }
   },
 
-  /** 是否启用了超星字体混淆（题目文字被替换为图形字体，AI 无法可靠识别） */
+  /** 仅检测字体混淆标记；是否能够还原由 CxFont 的查表/视觉策略决定。 */
   hasFontObfuscation(doc) {
     if (!doc) return false;
     try {

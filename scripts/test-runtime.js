@@ -64,7 +64,8 @@ function runtime() {
   const source = fs.readFileSync(path.join(__dirname, '..', 'shuakejiang.user.js'), 'utf8');
   const code = source.replace(/\n\s*main\(\);\s*\n\}\)\(\);\s*$/, `
     globalThis.api = { CxCourseRunner, CxDom, Site, ExamAssistant, VideoAssistant, UIController,
-      AppState, Storage, getConfig, setConfig, requestOpenAI, skjWaitFor, skjWithTimeout };
+      AppState, Storage, getConfig, setConfig, requestOpenAI, requestQuestionBatch, skjWaitFor, skjWithTimeout,
+      CxFont, CX_FONT_LIB, CX_FONT_TABLE, resolveCxVisionConfig, requestCxGlyphRecognition };
   })();`);
   if (code === source) throw new Error('Runtime export seam missing');
   vm.runInContext(code, sandbox);

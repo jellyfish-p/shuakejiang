@@ -1,0 +1,109 @@
+Third-party notices for cxFontTable.js and typrMd5.js only
+=======================================================
+
+These notices do NOT license the original extension, its bundle, or its business
+logic as MIT. Only the flat mapping data and the independent libraries identified
+below have been extracted. The wrappers do not change the upstream algorithms.
+
+1. Chaoxing font fingerprint table (cxFontTable.js)
+-------------------------------------------------
+Source: reference/original-extension/1.17.4/beautified/SideBar.js
+Module: 3ErB5; object literal at lines 172842-193749 (1-based).
+Attribution and license declaration preserved verbatim as object fields:
+  author: "wyn665817"
+  namespace: "wyn665817@163.com"
+  license: "MIT"
+  version: "20220515.1"
+
+No separate upstream copyright notice, copyright year, or complete license text
+for this table was found in the inspected source/cache. No year or additional
+copyright claim is invented here. The following is the standard MIT permission
+and warranty text accompanying the source's MIT declaration, not a purported
+verbatim upstream copyright notice. This attribution/notice provenance remains
+an item for confirmation before redistribution.
+
+[BEGIN TABLE MIT TERMS]
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+[END TABLE MIT TERMS]
+
+2. Photopea Typr.js and Typr.U.js (typrMd5.js)
+-------------------------------------------
+Typr.js commit: 15aa12ffa6cf39e8788562ea4af65b42317375fb
+Typr.U.js commit: f4fcdeb8014edc75ab7296bd85ac9cde8cb30489
+Complete LICENSE text verified at BOTH fixed commits:
+https://raw.githubusercontent.com/photopea/Typr.js/15aa12ffa6cf39e8788562ea4af65b42317375fb/LICENSE
+https://raw.githubusercontent.com/photopea/Typr.js/f4fcdeb8014edc75ab7296bd85ac9cde8cb30489/LICENSE
+Each response: 1075 bytes, SHA256:
+44b8cdb76bb7adb8fb3ca23a63d4bbf32c2be201bae44106e712094e6cff42a7
+
+[BEGIN PHOTOPEA LICENSE]
+The MIT License (MIT)
+
+Copyright (c) 2016 Photopea
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+[END PHOTOPEA LICENSE]
+
+3. blueimp JavaScript-MD5 2.19.0 (typrMd5.js)
+------------------------------------------
+Source pinned by the original TyprMd5.js header:
+https://cdn.jsdelivr.net/npm/blueimp-md5@2.19.0/js/md5.min.js
+Complete license verified at:
+https://cdn.jsdelivr.net/npm/blueimp-md5@2.19.0/LICENSE.txt
+Response: 1093 bytes, SHA256:
+ce2ef2581ac80c09ea7025ce0eca7995b1cdc631cd0daaffce3a1353bc2143f8
+
+[BEGIN BLUEIMP LICENSE]
+MIT License
+
+Copyright © 2011 Sebastian Tschan, https://blueimp.net
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+[END BLUEIMP LICENSE]

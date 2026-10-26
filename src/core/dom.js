@@ -86,16 +86,18 @@ function skjHumanClick(el) {
   if (!el || el.nodeType !== 1) return false;
   try {
     const win = el.ownerDocument?.defaultView || window;
-    try {
-      el.removeAttribute('href');
-    } catch (e) {}
-    ['mousedown', 'mouseup', 'click'].forEach((type) => {
+    if (el.disabled || el.isConnected === false) return false;
+    // 保留 href：超星部分选项/提交入口通过 javascript: 链接执行站点逻辑。
+    // mousedown/up 后只触发一次 click，避免 checkbox 被重复切换。
+    ['mousedown', 'mouseup'].forEach((type) => {
       try {
         el.dispatchEvent(
           new win.MouseEvent(type, { bubbles: true, cancelable: true, view: win, button: 0 })
         );
       } catch (e) {}
     });
+    if (typeof el.click === 'function') el.click();
+    else el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, view: win, button: 0 }));
     return true;
   } catch (e) {
     try {
@@ -173,6 +175,59 @@ function skjOptionMatches(optionText, answer) {
   const ans = String(answer == null ? '' : answer).trim();
   if (letter && ans && letter === ans.toUpperCase()) return true;
   return !!text && text === ans;
+}
+
+/** 超星原生 input 与自绘选项共用的选中状态读取。 */
+function skjChoiceControl(el) {
+  return el.querySelector('input[type="radio"], input[type="checkbox"]') ||
+    el.querySelector('[name^=answercheck]') || el.querySelector('[name^=answer]') ||
+    el.querySelector('.num_option_dx') || el.querySelector('.num_option') || el.querySelector('input');
+}
+
+function skjChoiceSelected(el) {
+  const control = skjChoiceControl(el);
+  if (control && /^(radio|checkbox)$/i.test(control.type || '')) return !!control.checked;
+  return [control, el].filter(Boolean).some(node =>
+    node.getAttribute('aria-checked') === 'true' ||
+    ['check_answer', 'check_answer_dx', 'is-checked'].some(name => node.classList.contains(name))
+  );
+}
+
+/** 严格判断词匹配，不能把 false 中的字母或“不正确”当成 true。 */
+function skjJudgmentValue(text) {
+  const value = String(text == null ? '' : text).trim().replace(/^[（(]?\s*[A-Z](?:\s*[、.，,．。)）:：]\s*|\s+)/i, '').trim();
+  if (/^(正确|对|是|√|✓|true|t|yes)$/i.test(value)) return true;
+  if (/^(错误|错|否|不正确|×|✗|✘|false|f|no)$/i.test(value)) return false;
+  return null;
+}
+
+/** 按请求中的选项顺序定位，不依赖 CSS 伪元素里的 A/B；点击后核验完整选中集合。 */
+function skjFillChoice(list, questionType, answer, optionTexts = null) {
+  if (!list.length || list.some(el => el.isConnected === false)) return false;
+  if (optionTexts !== null && (!Array.isArray(optionTexts) || optionTexts.length !== list.length)) return false;
+  const multi = questionType.includes('多选');
+  const text = String(answer == null ? '' : answer).trim().toUpperCase();
+  let indices = [];
+  if (questionType.includes('判断') && !/^[A-Z]$/.test(text)) {
+    const value = skjJudgmentValue(answer);
+    if (value === null) return false;
+    // 字体混淆不修改页面：判断题必须使用提取时已还原的选项文字。
+    const matches = list.map((el, index) => skjJudgmentValue(optionTexts ? optionTexts[index] : el.innerText) === value ? index : -1).filter(i => i >= 0);
+    if (matches.length !== 1) return false;
+    indices = matches;
+  } else {
+    if (!(multi ? /^[A-Z]+$/ : /^[A-Z]$/).test(text)) return false;
+    indices = Array.from(new Set(text)).map(letter => letter.charCodeAt(0) - 65);
+  }
+  if (!indices.length || indices.some(i => i < 0 || i >= list.length)) return false;
+  const expected = new Set(indices);
+  for (let i = 0; i < list.length; i++) {
+    const should = expected.has(i);
+    if (skjChoiceSelected(list[i]) === should || (!multi && !should)) continue;
+    const control = skjChoiceControl(list[i]);
+    if (!skjHumanClick(control || list[i])) return false;
+  }
+  return list.every((el, i) => skjChoiceSelected(el) === expected.has(i));
 }
 
 /** 在多个文档中按选择器顺序查找第一个元素（options.visible=true 时要求可见） */
