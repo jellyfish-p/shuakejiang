@@ -35,6 +35,54 @@ test('route change is observed while tick is still waiting', async () => {
   assert.equal(s.runner.running, false);
 });
 
+test('cards refresh keys preserve business parameters and real route changes', () => {
+  const r = runtime(), s = study(r);
+  const cardsUrl = 'https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?courseid=course-1&clazzid=class-1&knowledgeid=chapter-1&num=0&cardid=card-1';
+  s.main.attrs.src = cardsUrl; s.studyDoc.URL = cardsUrl;
+  const initialKey = r.CxDom.routeInfo().key;
+  for (const cache of ['_dc', '_t', '_']) {
+    s.main.attrs.src = cardsUrl + `&${cache}=200000`;
+    s.studyDoc.URL = cardsUrl + `&${cache}=300000`;
+    assert.equal(r.CxDom.routeInfo().key, initialKey, `${cache} must not reset the queue`);
+  }
+  for (const param of ['courseid', 'clazzid', 'knowledgeid', 'num', 'cardid', 'other']) {
+    const url = new URL(cardsUrl); url.searchParams.set(param, 'different');
+    // Detect a real navigation even while src and the loaded document disagree.
+    s.main.attrs.src = url.href; s.studyDoc.URL = cardsUrl;
+    assert.notEqual(r.CxDom.routeInfo().key, initialKey, `${param} change in src must be detected`);
+    s.main.attrs.src = cardsUrl; s.studyDoc.URL = url.href;
+    assert.notEqual(r.CxDom.routeInfo().key, initialKey, `${param} change in document must be detected`);
+  }
+  s.main.attrs.src = cardsUrl; s.studyDoc.URL = cardsUrl;
+  r.location.href += '?courseid=other';
+  assert.notEqual(r.CxDom.routeInfo().key, initialKey, 'top-level navigation must still be detected');
+  const otherUrl = 'https://mooc1.chaoxing.com/other?num=0';
+  assert.notEqual(r.CxDom.routeUrlKey(otherUrl), r.CxDom.routeUrlKey(otherUrl + '&_dc=1'),
+    'cache parameter exceptions are limited to cards pages');
+});
+
+test('switching cards still cancels an in-flight task and rescans', async () => {
+  const r = runtime(), s = study(r);
+  const cardsUrl = 'https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?courseid=course-1&clazzid=class-1&knowledgeid=chapter-1&num=0';
+  s.main.attrs.src = cardsUrl; s.studyDoc.URL = cardsUrl;
+  s.taskDoc.select('video', null).select('video, audio', null);
+  let scans = 0;
+  const listTasks = r.CxDom.listTasks.bind(r.CxDom);
+  r.CxDom.listTasks = (...args) => { scans++; return listTasks(...args); };
+  await s.runner.tick(r.getConfig());
+  const pending = s.runner.tick(r.getConfig());
+  await r.advance(100);
+  const nextDoc = r.doc(cardsUrl.replace('num=0', 'num=1'));
+  s.main.attrs.src = nextDoc.URL; s.main.contentDocument = nextDoc;
+  s.runner.tick(r.getConfig());
+  await r.advance(1000); await pending;
+  assert.equal(s.runner.index, 0, 'old task must not advance the new card');
+  await s.runner.tick(r.getConfig());
+  await s.runner.tick(r.getConfig());
+  assert.equal(scans, 2, 'new card must trigger a fresh task scan');
+  assert.equal(s.runner.routeKey, r.CxDom.routeInfo().key);
+});
+
 test('interrupted config version never restores enabled defaults', () => {
   const r = runtime();
   r.store.set('videoEnabled', false); r.store.set('autoSubmit', false);

@@ -219,7 +219,7 @@ async function requestCxGlyphRecognition(imageDataUrl, ids, config) {
 }
 
 /**
- * 一次只请求 1..4 题；返回 Map<题目 id, string | string[]>。
+ * 一次请求 1..CX_MAX_BATCH_SIZE 题（默认每批 4 题）；返回 Map<题目 id, string | string[]>。
  * 无效答案不进入 Map，协议错误直接抛出，不重试或退回纯文本请求。
  */
 async function requestQuestionBatch(questions, config, note = '') {

@@ -60,6 +60,144 @@ test('chapter batches 9 questions as 4/4/1 and maps shuffled JSON answers by id'
   assert.equal(result.submitSafe, false);
 });
 
+function controlledBatchAPI(r) {
+  const requests = [];
+  let active = 0, peak = 0;
+  r.sandbox.fetch = (_, options) => {
+    const questions = JSON.parse(JSON.parse(options.body).messages[1].content).questions;
+    active++; peak = Math.max(peak, active);
+    return new Promise((resolve, reject) => {
+      requests.push({
+        questions,
+        reply(answer = 'B') {
+          active--;
+          resolve({ ok: true, json: async () => ({ choices: [{ message: {
+            content: JSON.stringify({ answers: questions.map(q => ({ id: q.id, answer: [answer] })).reverse() })
+          } }] }) });
+        },
+        fail() { active--; reject(new Error('test rate limit')); }
+      });
+    });
+  };
+  return { requests, get peak() { return peak; } };
+}
+
+test('default three-way requests refill freed slots and wait for all answers before submitting', async () => {
+  const r = runtime(), s = chapter(r, 13), ui = submission(r, s.d), ea = new r.ExamAssistant();
+  r.setConfig({ autoSubmit: true });
+  const api = controlledBatchAPI(r);
+  const pending = ea.runCxWorkDoc(s.d, r.getConfig()); await r.flush();
+  assert.equal(api.requests.length, 3, 'three batches must start before any response');
+  assert.deepEqual(api.requests.map(req => req.questions.length), [4, 4, 4]);
+  // Scheduling settings are a per-run snapshot; changing them applies next time.
+  r.setConfig({ cxBatchSize: 1, cxConcurrency: 1 });
+  api.requests[1].reply('A'); await r.advance(800);
+  assert.equal(api.requests.length, 4, 'a freed worker must not wait for the slow first batch');
+  assert.equal(api.requests[3].questions.length, 1);
+  api.requests[3].reply(); api.requests[2].reply(); await r.advance(1000);
+  assert.equal(ui.save.clicks, 0); assert.equal(ui.submit.clicks, 0);
+  api.requests[0].reply(); await r.advance(30000);
+  assert.equal((await pending).reason, 'submitted');
+  assert.equal(api.peak, 3);
+  assert.ok(s.choices.every((opts, i) => opts[i >= 4 && i < 8 ? 0 : 1].input.checked));
+  assert.equal(ui.save.clicks, 1); assert.equal(ui.submit.clicks, 1); assert.equal(ui.confirm.clicks, 1);
+});
+
+test('custom batch size supports more than four questions and serial concurrency', async () => {
+  const r = runtime(), s = chapter(r, 15), ea = new r.ExamAssistant();
+  r.setConfig({ cxBatchSize: 7, cxConcurrency: 1 });
+  const api = controlledBatchAPI(r);
+  const pending = ea.runCxWorkDoc(s.d, r.getConfig()); await r.flush();
+  assert.equal(api.requests.length, 1); assert.equal(api.requests[0].questions.length, 7);
+  api.requests[0].reply(); await r.advance(800);
+  assert.equal(api.requests.length, 2); assert.equal(api.requests[1].questions.length, 7);
+  api.requests[1].reply(); await r.advance(800);
+  assert.equal(api.requests.length, 3); assert.equal(api.requests[2].questions.length, 1);
+  api.requests[2].reply(); await r.advance(30000); await pending;
+  assert.equal(api.peak, 1);
+  assert.ok(s.choices.every(opts => opts[1].input.checked));
+});
+
+test('parallel batches still fill DOM serially and block submit after a failed request', async () => {
+  const r = runtime(), s = chapter(r, 9), ui = submission(r, s.d), ea = new r.ExamAssistant();
+  r.setConfig({ autoSubmit: true });
+  let filling = 0, peak = 0;
+  const fill = ea.fillCxQuestion.bind(ea);
+  ea.fillCxQuestion = async (...args) => {
+    filling++; peak = Math.max(peak, filling);
+    await new Promise(resolve => r.sandbox.setTimeout(resolve, 100));
+    const result = fill(...args); filling--; return result;
+  };
+  const api = controlledBatchAPI(r);
+  const pending = ea.runCxWorkDoc(s.d, r.getConfig()); await r.flush();
+  assert.equal(api.requests.length, 3);
+  api.requests[0].fail(); api.requests[1].reply(); await r.advance(1000);
+  assert.equal(ui.save.clicks, 0, 'a failed batch must not end the run while others are pending');
+  api.requests[2].reply(); await r.advance(30000);
+  assert.match((await pending).reason, /4题未完成/);
+  assert.equal(peak, 1); assert.equal(ui.save.clicks, 1); assert.equal(ui.submit.clicks, 0);
+  assert.ok(s.choices.slice(0, 4).every(opts => !opts[1].input.checked));
+  assert.ok(s.choices.slice(4).every(opts => opts[1].input.checked));
+});
+
+for (const cancel of ['disabled', 'route', 'api-config']) {
+  test(`parallel request ${cancel} cancellation discards late answers and never starts queued batches`, async () => {
+    const r = runtime(), s = chapter(r, 17), ui = submission(r, s.d), ea = new r.ExamAssistant();
+    r.setConfig({ autoSubmit: true });
+    const api = controlledBatchAPI(r); let cancelled = false;
+    const pending = ea.solveCxWorkDoc(s.d, r.getConfig(), { cancelled: () => cancelled }); await r.flush();
+    assert.equal(api.requests.length, 3);
+    if (cancel === 'disabled') r.setConfig({ examEnabled: false });
+    if (cancel === 'route') cancelled = true;
+    if (cancel === 'api-config') r.setConfig({ openaiModel: 'changed-model' });
+    api.requests.forEach(req => req.reply()); await r.advance(30000);
+    assert.equal((await pending).reason, 'cancelled'); assert.equal(api.requests.length, 3);
+    assert.equal(ui.save.clicks, 0); assert.equal(ui.submit.clicks, 0);
+    assert.ok(s.choices.every(opts => !opts[1].input.checked));
+    assert.equal(ea.workPromise, null, 'all workers must finish before releasing the single-flight lock');
+  });
+}
+
+test('observed cancellation stays cancelled if the assistant is re-enabled before other replies', async () => {
+  const r = runtime(), s = chapter(r, 17), ui = submission(r, s.d), ea = new r.ExamAssistant();
+  r.setConfig({ autoSubmit: true });
+  const api = controlledBatchAPI(r);
+  const pending = ea.solveCxWorkDoc(s.d, r.getConfig()); await r.flush();
+  assert.equal(api.requests.length, 3);
+  r.setConfig({ examEnabled: false }); api.requests[0].reply(); await r.flush();
+  assert.ok(ea.workPromise, 'single-flight must remain held while old requests are still pending');
+  r.setConfig({ examEnabled: true });
+  api.requests[1].reply(); api.requests[2].reply(); await r.advance(30000);
+  assert.equal(api.requests.length, 3, 'cancelled workers must not restart queued batches');
+  assert.equal((await pending).reason, 'cancelled');
+  assert.equal(ui.save.clicks, 0); assert.equal(ui.submit.clicks, 0);
+  assert.ok(s.choices.every(opts => !opts[1].input.checked));
+});
+
+test('request scheduling clamps stored concurrency and batch-size values at runtime', async () => {
+  const r = runtime(), s = chapter(r, 14), ea = new r.ExamAssistant();
+  r.setConfig({ cxBatchSize: '1', cxConcurrency: 999 });
+  const api = controlledBatchAPI(r);
+  const pending = ea.runCxWorkDoc(s.d, r.getConfig()); await r.flush();
+  assert.equal(api.requests.length, 6);
+  for (let start = 0; start < 14;) {
+    const batch = api.requests.slice(start); start += batch.length;
+    assert.ok(batch.length > 0);
+    batch.forEach(req => req.reply()); await r.advance(800);
+  }
+  await r.advance(30000); await pending;
+  assert.equal(api.peak, 6); assert.equal(api.requests.length, 14);
+  assert.ok(api.requests.every(req => req.questions.length === 1));
+
+  const r2 = runtime(), s2 = chapter(r2, 21), ea2 = new r2.ExamAssistant();
+  r2.setConfig({ cxBatchSize: 999, cxConcurrency: 2 });
+  const requests = mockBatchAPI(r2, qs => ({ answers: qs.map(q => ({ id: q.id, answer: ['B'] })) }));
+  const pending2 = ea2.runCxWorkDoc(s2.d, r2.getConfig());
+  await r2.flush(); await r2.advance(30000); await pending2;
+  assert.deepEqual(requests.map(body => JSON.parse(body.messages[1].content).questions.length), [20, 1]);
+  assert.ok(s2.choices.every(opts => opts[1].input.checked));
+});
+
 test('chapter single choice selects by option order when letters are not in innerText', async () => {
   const r = runtime(), ea = new r.ExamAssistant(), q = r.node();
   const opts = [choice(r, '甲'), choice(r, '乙')];
@@ -125,6 +263,52 @@ test('valid batch fills all choices before saving and confirming submission', as
   assert.equal(result.reason, 'submitted'); assert.equal(result.submitSafe, true);
 });
 
+for (const refresh of ['cache', 'relative', 'query-order']) {
+  test(`chapter submission ${refresh} refresh continues without rescanning completed tasks`, async () => {
+    const r = runtime(), s = chapter(r, 1), ui = submission(r, s.d);
+    r.setConfig({ autoSubmit: true });
+    mockBatchAPI(r, qs => ({ answers: qs.map(q => ({ id: q.id, answer: ['B'] })) }));
+
+    const cardsUrl = 'https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?courseid=course-1&clazzid=class-1&knowledgeid=chapter-1&num=0';
+    const studyDoc = r.doc(cardsUrl), main = r.node(), work = r.node(), inner = r.node();
+    const outer = r.doc('https://mooc1.chaoxing.com/ananas/modules/work/index.html');
+    main.attrs.src = cardsUrl; main.contentDocument = studyDoc;
+    main.contentWindow = { document: studyDoc };
+    work.attrs.src = outer.URL; work.contentDocument = outer;
+    work.contentWindow = { document: outer }; work.ownerDocument = studyDoc;
+    inner.contentDocument = s.d; inner.contentWindow = { document: s.d };
+    outer.select('#frame_content', inner).select('iframe, frame', [inner]);
+    studyDoc.select('iframe', [work]).select('iframe, frame', [work]);
+    r.document.select('#iframe', main).select('iframe, frame', [main]);
+    const next = r.node(); next.ownerDocument = r.document;
+    r.document.select('#prevNextFocusNext', next);
+    // Keep submission pending across scheduler ticks while the same cards URL changes.
+    ui.confirm.addEventListener('click', () => {
+      if (refresh === 'cache') {
+        studyDoc.URL = cardsUrl + '&_dc=200000';
+        main.attrs.src = studyDoc.URL;
+      } else if (refresh === 'relative') {
+        main.attrs.src = new URL(cardsUrl).pathname + new URL(cardsUrl).search;
+      } else {
+        studyDoc.URL = cardsUrl.split('?')[0] + '?' + cardsUrl.split('?')[1].split('&').reverse().join('&');
+        main.attrs.src = studyDoc.URL;
+      }
+      s.d.select('.testTit_status, .ceyan_status', null);
+      r.sandbox.setTimeout(() => s.d.select('.testTit_status, .ceyan_status', r.node('已提交')), 1800);
+    });
+    let scans = 0;
+    const listTasks = r.CxDom.listTasks.bind(r.CxDom);
+    r.CxDom.listTasks = (...args) => { scans++; return listTasks(...args); };
+    const va = new r.VideoAssistant(); va.setExamAssistant(new r.ExamAssistant(va));
+    va.start();
+    await r.advance(9000);
+    va.stop();
+    assert.equal(ui.confirm.clicks, 1, 'the real answer/save/confirm flow must run');
+    assert.equal(scans, 1, 'submission must not restart the current chapter task scan');
+    assert.equal(next.clicks, 1, 'the completed queue should navigate once');
+  });
+}
+
 test('missing answer blocks submit while retaining valid answers for review', async () => {
   const r = runtime(), s = chapter(r, 3), ui = submission(r, s.d), ea = new r.ExamAssistant();
   r.setConfig({ autoSubmit: true });
@@ -156,6 +340,7 @@ for (const kind of ['duplicate', 'unknown', 'invalid-choice', 'invalid-type', 'n
 
 test('disabling exam during a batch prevents late answers and all submit actions', async () => {
   const r = runtime(), s = chapter(r, 5), ui = submission(r, s.d), ea = new r.ExamAssistant();
+  r.setConfig({ cxConcurrency: 1 }); // This case specifically covers cancellation of a serial run.
   let resolve, calls = 0;
   r.sandbox.fetch = (_, options) => {
     calls++; const qs = JSON.parse(JSON.parse(options.body).messages[1].content).questions;
@@ -246,11 +431,11 @@ test('JSON batch supports mixed types, fenced JSON, lowercase choices and litera
   ]);
 });
 
-test('batch entry rejects more than four questions before contacting the API', async () => {
+test('batch entry rejects more than twenty questions before contacting the API', async () => {
   const r = runtime(); let calls = 0;
   r.sandbox.fetch = () => { calls++; throw new Error('must not request'); };
-  const questions = Array.from({ length: 5 }, (_, i) => ({ id: `q${i}`, type: '单选题', title: '测试', options: ['甲'] }));
-  await assert.rejects(r.requestQuestionBatch(questions, r.getConfig()), /1\.\.4/);
+  const questions = Array.from({ length: 21 }, (_, i) => ({ id: `q${i}`, type: '单选题', title: '测试', options: ['甲'] }));
+  await assert.rejects(r.requestQuestionBatch(questions, r.getConfig()), /1\.\.20/);
   assert.equal(calls, 0);
 });
 
@@ -375,6 +560,70 @@ test('captured title header does not cause a second click while the first confir
   const pending = ea.saveCxWork(d, { submit: true }); await r.advance(30000);
   assert.equal(await pending, 'submitted'); assert.equal(ui.ok.clicks, 1);
 });
+
+test('submit and successive popup confirmations are separated by at least 300ms', async () => {
+  const r = runtime(), d = r.doc(), ea = new r.ExamAssistant(), ui = capturedPopup(r, d);
+  const submit = r.node(), times = []; submit.ownerDocument = d;
+  d.select('.btnSubmit.workBtnIndex, .btnSubmit', submit);
+  submit.addEventListener('click', () => times.push(r.sandbox.Date.now()));
+  ui.ok.addEventListener('click', () => {
+    times.push(r.sandbox.Date.now());
+    if (ui.ok.clicks === 1) ui.content.innerText = '再次确认提交？';
+    else d.select('#workpop', null).select('#workpopFocus', null)
+      .select('.testTit_status, .ceyan_status', r.node('已提交'));
+  });
+  const pending = ea.saveCxWork(d, { submit: true });
+  await r.advance(1499); assert.equal(ui.ok.clicks, 0);
+  await r.advance(1); assert.equal(ui.ok.clicks, 1);
+  await r.advance(299); assert.equal(ui.ok.clicks, 1);
+  await r.advance(1); assert.equal(ui.ok.clicks, 2);
+  assert.equal(await pending, 'submitted');
+  assert.deepEqual(times.slice(1).map((time, i) => time - times[i]), [300, 300]);
+});
+
+for (const phase of ['first', 'followup']) {
+  for (const action of ['disable', 'warning', 'removed']) {
+    test(`${phase} popup ${action} during 300ms delay prevents stale confirmation`, async () => {
+      const r = runtime(), d = r.doc(), ea = new r.ExamAssistant(), ui = capturedPopup(r, d);
+      const submit = r.node(); submit.ownerDocument = d;
+      d.select('.btnSubmit.workBtnIndex, .btnSubmit', submit);
+      ui.ok.addEventListener('click', () => { ui.content.innerText = '再次确认提交？'; });
+      const pending = ea.saveCxWork(d, { submit: true });
+      await r.advance(phase === 'first' ? 1300 : 1600);
+      if (action === 'disable') r.setConfig({ autoSubmit: false });
+      if (action === 'warning') ui.content.innerText = '仍有题目未作答';
+      if (action === 'removed') {
+        ui.popup.isConnected = false;
+        d.select('#workpop', null).select('#workpopFocus', null);
+      }
+      await r.advance(30000);
+      assert.equal(await pending, action === 'warning' ? 'incomplete' : 'cancelled');
+      assert.equal(ui.ok.clicks, phase === 'first' ? 0 : 1);
+      assert.equal(ui.no.clicks, action === 'warning' ? 1 : 0);
+    });
+  }
+}
+
+for (const action of ['confirm', 'disable', 'warning', 'removed', 'route']) {
+  test(`standalone exam popup ${action} also respects the 300ms confirmation delay`, async () => {
+    const r = runtime(), d = r.document, ea = new r.ExamAssistant(), ui = capturedPopup(r, d);
+    const submit = r.node(); submit.ownerDocument = d;
+    d.select('a.completeBtn, .btnSubmit', submit);
+    ui.popup.select('#popok, .popBottom .confirm, .popok', ui.ok);
+    let cancelled = false;
+    const pending = ea.saveQuestionLiPage(r.getConfig(), 0, false, () => cancelled);
+    await r.advance(100);
+    assert.equal(submit.clicks, 1); assert.equal(ui.ok.clicks, 0);
+    if (action === 'disable') r.setConfig({ autoSubmit: false });
+    if (action === 'warning') ui.content.innerText = '还有题目未作答';
+    if (action === 'removed') { ui.popup.isConnected = false; d.select('#workpop', null).select('#workpopFocus', null); }
+    if (action === 'route') cancelled = true;
+    await r.advance(199); assert.equal(ui.ok.clicks, 0);
+    await r.advance(1); await pending;
+    assert.equal(ui.ok.clicks, action === 'confirm' ? 1 : 0);
+    assert.equal(ui.no.clicks, action === 'warning' ? 1 : 0);
+  });
+}
 
 test('captured focus header is ignored when its enclosing overlay is hidden', () => {
   const r = runtime(), d = r.doc(), ea = new r.ExamAssistant(), ui = capturedPopup(r, d);

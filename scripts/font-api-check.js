@@ -7,6 +7,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9xkAAAAASUVORK5CYII=';
 const visionKeys = ['cxVisionBaseUrl', 'cxVisionApiKey', 'cxVisionModel'];
 const mainKeys = ['openaiBaseUrl', 'openaiApiKey', 'openaiModel'];
+const requestKeys = ['cxBatchSize', 'cxConcurrency'];
 const fixtureConfig = (patch = {}) => ({
   openaiBaseUrl: 'https://main.example.invalid/v1',
   openaiApiKey: 'main-test-key',
@@ -48,20 +49,25 @@ function settings(r, patch = {}) {
     return n;
   };
   for (const id of ['skj-widget-btn', 'skj-modal', 'skj-close-btn', 'skj-save-api-btn',
-    'skj-cx-vision-settings', 'skj-cx-vision-independent']) add(id);
-  for (const key of [...mainKeys, ...visionKeys, 'cxFontStrategy', 'cxVisionUseMain', 'playbackRate']) {
+    'skj-cx-vision-settings', 'skj-cx-vision-independent', 'skj-save-tip']) add(id);
+  for (const key of [...mainKeys, ...visionKeys, ...requestKeys, 'cxFontStrategy', 'cxVisionUseMain', 'playbackRate']) {
     add('skj-cfg-' + key, { value: String(cfg[key]), disabled: false });
   }
   for (const key of ['videoEnabled', 'autoNext', 'skipFinished', 'muted', 'autoSolveVideoQuiz', 'examEnabled', 'autoSubmit']) {
     add('skj-cfg-' + key, { checked: cfg[key] });
   }
   r.sandbox.alert = () => {};
-  const ui = new r.UIController({ optionsChanged() {}, findMediaElements: () => [], applyPlaybackRate() {} }, {});
+  const videoCalls = { optionsChanged: 0, findMediaElements: 0, applyPlaybackRate: 0 };
+  const ui = new r.UIController({
+    optionsChanged() { videoCalls.optionsChanged++; },
+    findMediaElements() { videoCalls.findMediaElements++; return []; },
+    applyPlaybackRate() { videoCalls.applyPlaybackRate++; }
+  }, {});
   ui.bindEvents();
   const writes = [], save = r.sandbox.GM_setValue;
   r.sandbox.GM_setValue = (key, value) => { writes.push({ key, value: plain(value) }); save(key, value); };
   return {
-    ui, nodes, writes,
+    ui, nodes, writes, videoCalls,
     input: (key) => nodes['skj-cfg-' + key],
     change(key, value) {
       nodes['skj-cfg-' + key].value = value;
@@ -71,17 +77,40 @@ function settings(r, patch = {}) {
   };
 }
 
+function renderSettings(r) {
+  let modal;
+  r.document.createElement = () => r.node();
+  r.document.body.appendChild = el => { modal = el; };
+  new r.UIController({}, {}).createSettingsModal();
+  return modal.innerHTML;
+}
+
 test('defaults choose table and reuse without replacing legacy business preferences', () => {
   const r = runtime();
   r.store.set('autoSubmit', false); r.store.set('playbackRate', 1.5);
   const cfg = r.getConfig();
   assert.equal(cfg.cxFontStrategy, 'table'); assert.equal(cfg.cxVisionUseMain, true);
+  assert.equal(cfg.cxBatchSize, 4); assert.equal(cfg.cxConcurrency, 3);
   for (const key of visionKeys) assert.equal(cfg[key], '');
   assert.equal(cfg.autoSubmit, false); assert.equal(cfg.playbackRate, 1.5);
   r.setConfig({ cxFontStrategy: 'vision' });
   assert.equal(r.getConfig().autoSubmit, false);
   assert.equal(r.getConfig().playbackRate, 1.5);
   assert.equal(r.store.get('configSnapshotV1').cxFontStrategy, 'vision');
+});
+
+test('legacy per-key and snapshot configs gain request defaults without losing preferences or writing on read', () => {
+  for (const snapshot of [false, true]) {
+    const r = runtime(), legacy = { autoSubmit: false, playbackRate: 1.5, openaiApiKey: 'legacy-key' };
+    if (snapshot) r.store.set('configSnapshotV1', legacy);
+    else for (const [key, value] of Object.entries(legacy)) r.store.set(key, value);
+    const stored = plain([...r.store]);
+    assert.deepEqual(plain(r.getConfig()), { ...plain(runtime().getConfig()), ...legacy });
+    assert.deepEqual(plain([...r.store]), stored, 'reading old config must not rewrite storage');
+    r.setConfig({ cxBatchSize: 9 });
+    assert.equal(r.getConfig().cxBatchSize, 9); assert.equal(r.getConfig().cxConcurrency, 3);
+    for (const [key, value] of Object.entries(legacy)) assert.equal(r.getConfig()[key], value);
+  }
 });
 
 test('resolver reuses only the supplied main snapshot, not stored or independent parameters', () => {
@@ -295,6 +324,56 @@ test('legacy requestOpenAI text requests still omit JSON mode', async () => {
   assert.equal(requests[0].body.response_format, undefined);
 });
 
+test('UI request settings save only the edited field, preserving API drafts and newer cross-tab settings', () => {
+  for (const key of requestKeys) {
+    const r = runtime(), s = settings(r, {
+      cxBatchSize: 8, cxConcurrency: 2, autoSubmit: false, videoEnabled: false, playbackRate: 1.5
+    });
+    const other = requestKeys.find(k => k !== key);
+    for (const apiKey of [...mainKeys, ...visionKeys]) s.input(apiKey).value = 'unsaved-' + apiKey;
+    s.input(other).value = '5.7';
+    const crossTab = Object.fromEntries([...mainKeys, ...visionKeys].map(k => [k, 'other-tab-' + k]));
+    r.setConfig({ ...crossTab, autoSubmit: true, videoEnabled: true, playbackRate: 2,
+      [other]: other === 'cxBatchSize' ? 12 : 5 });
+    const before = plain(r.getConfig());
+    s.writes.length = 0;
+    s.change(key, '2.9');
+    assert.deepEqual(plain(r.getConfig()), { ...before, [key]: 2 });
+    assert.equal(s.input(key).value, '2');
+    assert.equal(s.input(other).value, '5.7', 'leave the unedited input alone');
+    for (const apiKey of [...mainKeys, ...visionKeys]) assert.equal(s.input(apiKey).value, 'unsaved-' + apiKey);
+    assert.deepEqual(s.writes, [{ key: 'configSnapshotV1', value: { ...before, [key]: 2 } }]);
+    assert.deepEqual(s.videoCalls, { optionsChanged: 0, findMediaElements: 0, applyPlaybackRate: 0 });
+    assert.match(s.nodes['skj-save-tip'].innerHTML, /自动保存.*下次答题生效/);
+  }
+});
+
+test('UI request settings normalize invalid values, decimals and bounds and write back only the edited input', () => {
+  const r = runtime(), s = settings(r);
+  const cases = [
+    ['1', 1, 1], [6, 6, 6], ['20', 20, 6], ['1000', 20, 6],
+    ['7.9', 7, 6], [' 2.9 ', 2, 2], ['1e2', 20, 6], ['0.5', 4, 3],
+    ['', 4, 3], ['  ', 4, 3], ['invalid', 4, 3], ['2oops', 4, 3],
+    [0, 4, 3], ['0', 4, 3], [-2, 4, 3], ['-2.9', 4, 3],
+    [Infinity, 4, 3], [-Infinity, 4, 3], ['Infinity', 4, 3], [NaN, 4, 3],
+    [true, 4, 3], [false, 4, 3], [{}, 4, 3], [[], 4, 3], [['2'], 4, 3]
+  ];
+  for (const [value, batchSize, concurrency] of cases) {
+    for (const [key, expected] of [['cxBatchSize', batchSize], ['cxConcurrency', concurrency]]) {
+      const other = requestKeys.find(k => k !== key), before = plain(r.getConfig()), writes = s.writes.length;
+      s.input(other).value = 'unedited-draft';
+      s.change(key, value);
+      assert.deepEqual(plain(r.getConfig()), { ...before, [key]: expected });
+      assert.equal(s.input(key).value, String(expected));
+      assert.equal(s.input(other).value, 'unedited-draft');
+      assert.equal(s.writes.length, writes + 1);
+      assert.equal(s.writes.at(-1).key, 'configSnapshotV1');
+      assert.deepEqual(s.writes.at(-1).value, { ...before, [key]: expected });
+    }
+  }
+  assert.deepEqual(s.videoCalls, { optionsChanged: 0, findMediaElements: 0, applyPlaybackRate: 0 });
+});
+
 test('UI strategy/source changes autosave only their own field, preserving credentials and business settings', () => {
   const r = runtime(), s = settings(r, { autoSubmit: false, videoEnabled: false, playbackRate: 1.5 });
   const before = plain(r.getConfig());
@@ -310,6 +389,8 @@ test('UI strategy/source changes autosave only their own field, preserving crede
   assert.equal(s.nodes['skj-cx-vision-independent'].hidden, false);
   assert.equal(s.writes.length, 2);
   assert.ok(s.writes.every(w => w.key === 'configSnapshotV1'));
+  assert.equal(s.videoCalls.optionsChanged, 2, 'other settings retain immediate assistant updates');
+  assert.equal(s.videoCalls.findMediaElements, 2);
 });
 
 test('UI manually saves both API triples in exactly one complete snapshot', () => {
@@ -342,14 +423,46 @@ test('UI hidden independent fields neither overwrite another tab nor lose local 
   for (const key of visionKeys) assert.equal(r.getConfig()[key], saved[key]);
 });
 
+test('UI renders normalized numeric request inputs before manual API settings without mutating stored values', () => {
+  const cases = [
+    [{}, 4, 3],
+    [{ cxBatchSize: '9.8', cxConcurrency: '2.9' }, 9, 2],
+    [{ cxBatchSize: 200, cxConcurrency: 40 }, 20, 6],
+    [{ cxBatchSize: '\"><script>', cxConcurrency: 'Infinity' }, 4, 3],
+    [{ cxBatchSize: null, cxConcurrency: [] }, 4, 3],
+    [{ cxBatchSize: 0.5, cxConcurrency: -2 }, 4, 3]
+  ];
+  for (const [patch, batchSize, concurrency] of cases) {
+    const r = runtime(); r.setConfig(patch);
+    const before = plain(r.getConfig()), stored = plain([...r.store]), html = renderSettings(r);
+    for (const [key, value, max, label] of [
+      ['cxBatchSize', batchSize, 20, '单次请求题目数'],
+      ['cxConcurrency', concurrency, 6, 'API 并发请求数']
+    ]) {
+      const input = html.match(new RegExp('<input\\b[^>]*id="skj-cfg-' + key + '"[^>]*>'));
+      assert.ok(input, key + ' input must exist');
+      for (const [attribute, expected] of Object.entries({ type: 'number', min: 1, max, step: 1, value })) {
+        assert.ok(input[0].includes(attribute + '="' + expected + '"'), key + ' ' + attribute);
+      }
+      assert.ok(html.includes('for="skj-cfg-' + key + '">' + label + '（自动保存）'));
+      assert.ok(html.indexOf('已默认开启【自动提交】') < html.indexOf('id="skj-cfg-' + key + '"'));
+      assert.ok(html.indexOf('id="skj-cfg-' + key + '"') < html.indexOf('大模型 API 接口参数设置 (需手动保存)'));
+    }
+    assert.match(html, /默认 4 题/); assert.match(html, /默认 3 并发/);
+    assert.match(html, /超星章节测验与作业\/考试批量解题生效/);
+    assert.match(html, /设为 1 即串行/); assert.match(html, /下次答题生效/);
+    assert.match(html, /过高可能触发 API 限流/);
+    assert.match(html, /id="skj-save-tip" aria-live="polite"/);
+    assert.ok(!html.includes('<script>'));
+    assert.deepEqual(plain(r.getConfig()), before, 'rendering does not normalize stored config');
+    assert.deepEqual(plain([...r.store]), stored, 'rendering does not save any fields');
+  }
+});
+
 test('UI renders escaped API values in double-quoted attributes and preserves default table selection', () => {
   const r = runtime(), attack = '\"><img src=x onerror=alert(1)>&';
   r.setConfig(Object.fromEntries([...mainKeys, ...visionKeys].map(key => [key, attack])));
-  let modal;
-  r.document.createElement = () => r.node();
-  r.document.body.appendChild = el => { modal = el; };
-  new r.UIController({}, {}).createSettingsModal();
-  const html = modal.innerHTML, expected = '&quot;&gt;&lt;img src=x onerror=alert(1)&gt;&amp;';
+  const html = renderSettings(r), expected = '&quot;&gt;&lt;img src=x onerror=alert(1)&gt;&amp;';
   for (const key of [...mainKeys, ...visionKeys]) {
     const match = html.match(new RegExp('id="skj-cfg-' + key + '"[^>]*value="([^"]*)"'));
     assert.ok(match, key + ' input must exist'); assert.equal(match[1], expected);

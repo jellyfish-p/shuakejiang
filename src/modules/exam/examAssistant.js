@@ -149,7 +149,7 @@ class ExamAssistant {
     };
   }
 
-  /** 共用批处理：每请求最多 4 题；按 ID 填入，缺失/非法答案计失败而非猜测。 */
+  /** 共用批处理：限量并发请求，全部收齐后串行填答；缺失/非法答案不猜测。 */
   async solveQuestionBatches(elements, config, { label, extract, fill, stopped = () => false, fontProtection = false }) {
     let ok = 0, failed = 0, reader = null;
     const plainText = el => el?.innerText || '';
@@ -170,52 +170,78 @@ class ExamAssistant {
         return { ok, failed: elements.length, aborted: false };
       }
     }
-    for (let start = 0; start < elements.length; start += 4) {
-      if (stopped()) return { ok, failed, aborted: true };
-      const batch = [];
-      for (let i = start; i < Math.min(start + 4, elements.length); i++) {
-        try {
-          reader?.assertCurrent();
-          const data = extract(elements[i], reader ? reader.readText : plainText);
-          if (!String(data.stem || '').trim()) throw new Error('题干为空');
-          batch.push({ ...data, id: `q${i + 1}`, title: data.stem, element: elements[i] });
-        } catch (err) {
-          failed++;
-          AppState.log(`[${label} ${i + 1}] 题目提取失败: ${err.message}`, 'error');
-        }
-      }
-      if (batch.length) {
-        AppState.setStatus(`正在解答${label} ${start + 1}-${start + batch.length}/${elements.length}...`);
-        let answers;
-        try {
-          reader?.assertCurrent();
-          answers = await requestQuestionBatch(batch.map(({ id, type, title, options }) => ({ id, type, title, options })), config);
-          reader?.assertCurrent();
-        } catch (err) {
-          answers = null;
-          failed += batch.length;
-          AppState.log(`[${label}] 本批请求/JSON 解析失败: ${err.message}`, 'error');
-        }
-        if (stopped()) return { ok, failed, aborted: true };
-        if (answers) {
-          for (const question of batch) {
-            if (stopped()) return { ok, failed, aborted: true };
-            try {
-              reader?.assertCurrent();
-              if (question.element.isConnected === false) throw new Error('题目已离开页面');
-              if (!answers.has(question.id)) throw new Error('JSON 答案缺失或无效');
-              const answer = answers.get(question.id);
-              if (!await fill(question.element, question, answer)) throw new Error('答案未能填入或选中状态校验失败');
-              ok++;
-              AppState.log(`[${label} ${question.id.slice(1)}] ${question.type} → ${JSON.stringify(answer)}`);
-            } catch (err) {
-              failed++;
-              AppState.log(`[${label} ${question.id.slice(1)}] 作答失败: ${err.message}`, 'error');
-            }
+    // 某个并发槽观察到取消后，整个任务保持取消；重新开启助手不能复活旧请求。
+    const stopRequested = stopped;
+    let aborted = false;
+    stopped = () => (aborted = aborted || stopRequested());
+
+    // 调度参数使用本次配置快照；修改面板只影响下一次答题。
+    const { batchSize, concurrency } = getCxRequestSettings(config);
+    const batches = [];
+    let nextStart = 0;
+    const requestWorker = async () => {
+      while (nextStart < elements.length) {
+        if (stopped()) return;
+        const start = nextStart;
+        nextStart += batchSize;
+        const batch = [];
+        const result = { batch, answers: null };
+        batches[start / batchSize] = result;
+        for (let i = start; i < Math.min(start + batchSize, elements.length); i++) {
+          try {
+            reader?.assertCurrent();
+            const data = extract(elements[i], reader ? reader.readText : plainText);
+            if (!String(data.stem || '').trim()) throw new Error('题干为空');
+            batch.push({ ...data, id: `q${i + 1}`, title: data.stem, element: elements[i] });
+          } catch (err) {
+            failed++;
+            AppState.log(`[${label} ${i + 1}] 题目提取失败: ${err.message}`, 'error');
           }
         }
+        if (batch.length) {
+          AppState.setStatus(`正在解答${label} ${start + 1}-${Math.min(start + batchSize, elements.length)}/${elements.length}（${concurrency} 路并发）...`);
+          try {
+            if (stopped()) return;
+            reader?.assertCurrent();
+            result.answers = await requestQuestionBatch(
+              batch.map(({ id, type, title, options }) => ({ id, type, title, options })), config
+            );
+            if (stopped()) return;
+            reader?.assertCurrent();
+          } catch (err) {
+            result.answers = null;
+            failed += batch.length;
+            AppState.log(`[${label} ${start + 1}-${Math.min(start + batchSize, elements.length)}] 本批请求/JSON 解析失败: ${err.message}`, 'error');
+          }
+        }
+        if (stopped()) return;
+        // 保留每个请求槽的节流间隔；其他槽无需等待本批响应。
+        if (nextStart < elements.length) await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
       }
-      if (start + 4 < elements.length) await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
+    };
+    const workers = Math.min(concurrency, Math.ceil(elements.length / batchSize));
+    // 取消时也等待已发出的请求收尾，避免释放单飞锁后旧请求与新任务叠加。
+    await Promise.all(Array.from({ length: workers }, () => requestWorker()));
+    if (stopped()) return { ok, failed, aborted: true };
+
+    // 请求完成顺序不决定填答顺序，DOM 操作与最后的暂存/提交都保持串行。
+    for (const { batch, answers } of batches) {
+      if (!answers) continue;
+      for (const question of batch) {
+        if (stopped()) return { ok, failed, aborted: true };
+        try {
+          reader?.assertCurrent();
+          if (question.element.isConnected === false) throw new Error('题目已离开页面');
+          if (!answers.has(question.id)) throw new Error('JSON 答案缺失或无效');
+          const answer = answers.get(question.id);
+          if (!await fill(question.element, question, answer)) throw new Error('答案未能填入或选中状态校验失败');
+          ok++;
+          AppState.log(`[${label} ${question.id.slice(1)}] ${question.type} → ${JSON.stringify(answer)}`);
+        } catch (err) {
+          failed++;
+          AppState.log(`[${label} ${question.id.slice(1)}] 作答失败: ${err.message}`, 'error');
+        }
+      }
     }
     return { ok, failed, aborted: stopped() };
   }
@@ -443,6 +469,10 @@ class ExamAssistant {
       });
       if (!canSubmit()) return 'cancelled';
       if (popup) {
+        // 给平台弹窗事件绑定/重绘留出时间；等待后重新校验开关、弹窗及提示内容。
+        await skjSleep(300);
+        if (!canSubmit() || popup.isConnected === false || !skjIsDeepVisible(popup) ||
+            this.findVisiblePopup([doc]) !== popup) return 'cancelled';
         const content = this.readPopupContent([doc], popup);
         if (/未做完|未完成|未作答|漏答/.test(content)) {
           this.clickPopupButton([doc], '#popno, .popno', popup);
@@ -481,6 +511,9 @@ class ExamAssistant {
         if (!canSubmit()) return 'cancelled';
         const focusPopup = followup?.popup;
         if (focusPopup) {
+          await skjSleep(300);
+          if (!canSubmit() || focusPopup.isConnected === false || !skjIsDeepVisible(focusPopup) ||
+              (this.findFocusPopup([doc]) || this.findVisiblePopup([doc])) !== focusPopup) return 'cancelled';
           const focusText = this.readPopupContent([doc], focusPopup);
           if (/未做完|未完成|未作答|漏答/.test(focusText)) {
             this.clickPopupButton([doc], '#popno, .popno', focusPopup);
@@ -639,6 +672,9 @@ class ExamAssistant {
         AppState.log('未检测到提交确认弹窗（可能已直接提交）', 'warn');
         return;
       }
+      await skjSleep(300);
+      if (!canSubmit() || popup.isConnected === false || !skjIsDeepVisible(popup) ||
+          this.findVisiblePopup() !== popup) return;
       const content = this.readPopupContent([], popup);
       if (/未做完|未完成|未作答|漏答/.test(content)) {
         this.clickPopupButton([], '#popno, .popno', popup);

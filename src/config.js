@@ -43,6 +43,9 @@ const Storage = {
   }
 };
 
+const CX_MAX_BATCH_SIZE = 20;
+const CX_MAX_CONCURRENCY = 6;
+
 const DEFAULT_CONFIG = {
   // 视频助手设置
   videoEnabled: true,
@@ -65,11 +68,25 @@ const DEFAULT_CONFIG = {
   cxVisionApiKey: '',
   cxVisionModel: '',
   autoSubmit: true, // 默认开启做题自动提交
-  solveInterval: 2000, // 每题间隔（毫秒）
+  solveInterval: 2000, // 逐题/超星每个并发请求槽的批次间隔（毫秒）
+  cxBatchSize: 4, // 超星章节测验与作业/考试：单次请求题目数
+  cxConcurrency: 3, // 超星批量解题：API 并发请求数
 
   // 界面设置
   panelPosition: { top: 80, right: 20 }
 };
+
+function getCxRequestSettings(config = {}) {
+  const normalize = (value, fallback, max) => {
+    const integer = typeof value === 'number' || typeof value === 'string'
+      ? Math.floor(Number(value)) : NaN;
+    return Number.isFinite(integer) && integer > 0 ? Math.min(integer, max) : fallback;
+  };
+  return {
+    batchSize: normalize(config?.cxBatchSize, DEFAULT_CONFIG.cxBatchSize, CX_MAX_BATCH_SIZE),
+    concurrency: normalize(config?.cxConcurrency, DEFAULT_CONFIG.cxConcurrency, CX_MAX_CONCURRENCY)
+  };
+}
 
 const CONFIG_SNAPSHOT_KEY = 'configSnapshotV1';
 

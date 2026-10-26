@@ -67,7 +67,23 @@ const CxDom = {
     }
   },
 
-  /** 学习页路由指纹（与参考扩展一致：顶层地址 + 主框架 src + 主框架文档地址） */
+  /** 同一学习页的相对/绝对地址、参数顺序和缓存刷新参数不应触发队列重置。 */
+  routeUrlKey(href, base = location.href) {
+    if (!href) return '';
+    try {
+      const url = new URL(href, base);
+      // 只忽略 cards 页的缓存参数，保留章节、任务卡、课程及其他业务参数。
+      if (/\/knowledge\/cards\/?$/.test(url.pathname)) {
+        for (const name of ['_dc', '_t', '_']) url.searchParams.delete(name);
+      }
+      url.searchParams.sort();
+      return url.href;
+    } catch (e) {
+      return String(href);
+    }
+  },
+
+  /** 学习页路由指纹：顶层地址 + 主框架 src + 主框架文档地址（规范化后比较）。 */
   routeInfo() {
     const fr = this.studyIframe();
     const href = location.href;
@@ -83,7 +99,7 @@ const CxDom = {
       href,
       iframeSrc,
       mainDocumentHref: docHref,
-      key: `${href}|${iframeSrc}|${docHref}`
+      key: [this.routeUrlKey(href), this.routeUrlKey(iframeSrc, document.baseURI || href), this.routeUrlKey(docHref)].join('|')
     };
   },
 

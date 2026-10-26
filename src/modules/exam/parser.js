@@ -52,8 +52,8 @@ function parseAnswerFromLLM(questionType, rawContent) {
  * 输入错误在发请求前抛出；旧的纯文本构造/解析函数保持不变。
  */
 function buildQuestionBatchPayload(questions, note = '') {
-  if (!Array.isArray(questions) || questions.length < 1 || questions.length > 4) {
-    throw new Error('批请求 questions 必须是包含 1..4 题的数组');
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > CX_MAX_BATCH_SIZE) {
+    throw new Error(`批请求 questions 必须是包含 1..${CX_MAX_BATCH_SIZE} 题的数组`);
   }
   if (typeof note !== 'string') throw new Error('批请求 note 必须是字符串');
 

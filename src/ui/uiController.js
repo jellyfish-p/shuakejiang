@@ -95,6 +95,7 @@ class UIController {
     modal.id = 'skj-modal';
 
     const cfg = getConfig();
+    const cxRequestSettings = getCxRequestSettings(cfg);
     const escapeAttribute = (value) => skjEscapeHtml(value).replace(/"/g, '&quot;');
     const visionEnabled = cfg.cxFontStrategy === 'vision';
     const independentVision = visionEnabled && cfg.cxVisionUseMain === false;
@@ -104,7 +105,7 @@ class UIController {
         <div class="skj-header">
           <div class="skj-header-title">
             <span>🤖 刷课酱控制台</span>
-            <span class="skj-badge">v2.2.0</span>
+            <span class="skj-badge">v2.2.1</span>
           </div>
           <button class="skj-close" id="skj-close-btn">&times;</button>
         </div>
@@ -238,6 +239,20 @@ class UIController {
               <span>已默认开启【自动提交】，答题完毕后将自动确认提交。如需人工检查核对，可在此处关闭此开关。</span>
             </div>
 
+            <div class="skj-form-item">
+              <label class="skj-form-label" for="skj-cfg-cxBatchSize">单次请求题目数（自动保存）</label>
+              <input type="number" class="skj-input" id="skj-cfg-cxBatchSize" min="1" max="${CX_MAX_BATCH_SIZE}" step="1" value="${cxRequestSettings.batchSize}">
+              <div class="skj-form-desc">默认 4 题，仅对超星章节测验与作业/考试批量解题生效。</div>
+            </div>
+
+            <div class="skj-form-item">
+              <label class="skj-form-label" for="skj-cfg-cxConcurrency">API 并发请求数（自动保存）</label>
+              <input type="number" class="skj-input" id="skj-cfg-cxConcurrency" min="1" max="${CX_MAX_CONCURRENCY}" step="1" value="${cxRequestSettings.concurrency}">
+              <div class="skj-form-desc">默认 3 并发，设为 1 即串行；仅对超星章节测验与作业/考试批量解题生效。</div>
+            </div>
+            <div class="skj-form-desc">以上配置下次答题生效，不影响正在进行的请求；参数过高可能触发 API 限流。</div>
+            <div class="skj-form-desc" id="skj-save-tip" aria-live="polite"></div>
+
             <div style="margin-top: 18px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: #334155; display: flex; align-items: center; gap: 6px;">
               <span>🔑</span>
               <span>大模型 API 接口参数设置 (需手动保存)</span>
@@ -357,6 +372,8 @@ class UIController {
       'skj-cfg-playbackRate',
       'skj-cfg-examEnabled',
       'skj-cfg-autoSubmit',
+      'skj-cfg-cxBatchSize',
+      'skj-cfg-cxConcurrency',
       'skj-cfg-cxFontStrategy',
       'skj-cfg-cxVisionUseMain'
     ];
@@ -408,6 +425,17 @@ class UIController {
    * 保存常规开关与选择设置（实时自动保存）
    */
   saveGeneralSettings(changedKey = null) {
+    if (changedKey === 'cxBatchSize' || changedKey === 'cxConcurrency') {
+      const input = document.getElementById('skj-cfg-' + changedKey);
+      const cfg = getConfig();
+      const settings = getCxRequestSettings({ [changedKey]: input?.value ?? cfg[changedKey] });
+      const value = changedKey === 'cxBatchSize' ? settings.batchSize : settings.concurrency;
+      setConfig({ [changedKey]: value });
+      if (input) input.value = String(value);
+      // 下次答题才采用新参数，不重启助手或取消当前请求。
+      this.showSaveTip('设置已实时自动保存，下次答题生效');
+      return;
+    }
     const rateEl = document.getElementById('skj-cfg-playbackRate');
     const cfg = getConfig();
     const strategyEl = document.getElementById('skj-cfg-cxFontStrategy');

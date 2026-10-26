@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         刷课酱 - 网课视频助手 & AI 解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.2.0
+// @version      2.2.1
 // @description  刷课酱 - 超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；按当前页面任务点队列依次推进，视频结束后继续处理章节测验，不回头跳转旧章节，全部完成后自动停止；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
@@ -436,6 +436,9 @@
     }
   };
 
+  const CX_MAX_BATCH_SIZE = 20;
+  const CX_MAX_CONCURRENCY = 6;
+
   const DEFAULT_CONFIG = {
     // 视频助手设置
     videoEnabled: true,
@@ -458,11 +461,25 @@
     cxVisionApiKey: '',
     cxVisionModel: '',
     autoSubmit: true, // 默认开启做题自动提交
-    solveInterval: 2000, // 每题间隔（毫秒）
+    solveInterval: 2000, // 逐题/超星每个并发请求槽的批次间隔（毫秒）
+    cxBatchSize: 4, // 超星章节测验与作业/考试：单次请求题目数
+    cxConcurrency: 3, // 超星批量解题：API 并发请求数
 
     // 界面设置
     panelPosition: { top: 80, right: 20 }
   };
+
+  function getCxRequestSettings(config = {}) {
+    const normalize = (value, fallback, max) => {
+      const integer = typeof value === 'number' || typeof value === 'string'
+        ? Math.floor(Number(value)) : NaN;
+      return Number.isFinite(integer) && integer > 0 ? Math.min(integer, max) : fallback;
+    };
+    return {
+      batchSize: normalize(config?.cxBatchSize, DEFAULT_CONFIG.cxBatchSize, CX_MAX_BATCH_SIZE),
+      concurrency: normalize(config?.cxConcurrency, DEFAULT_CONFIG.cxConcurrency, CX_MAX_CONCURRENCY)
+    };
+  }
 
   const CONFIG_SNAPSHOT_KEY = 'configSnapshotV1';
 
@@ -746,7 +763,7 @@
   }
 
   /**
-   * 一次只请求 1..4 题；返回 Map<题目 id, string | string[]>。
+   * 一次请求 1..CX_MAX_BATCH_SIZE 题（默认每批 4 题）；返回 Map<题目 id, string | string[]>。
    * 无效答案不进入 Map，协议错误直接抛出，不重试或退回纯文本请求。
    */
   async function requestQuestionBatch(questions, config, note = '') {
@@ -819,8 +836,8 @@
    * 输入错误在发请求前抛出；旧的纯文本构造/解析函数保持不变。
    */
   function buildQuestionBatchPayload(questions, note = '') {
-    if (!Array.isArray(questions) || questions.length < 1 || questions.length > 4) {
-      throw new Error('批请求 questions 必须是包含 1..4 题的数组');
+    if (!Array.isArray(questions) || questions.length < 1 || questions.length > CX_MAX_BATCH_SIZE) {
+      throw new Error(`批请求 questions 必须是包含 1..${CX_MAX_BATCH_SIZE} 题的数组`);
     }
     if (typeof note !== 'string') throw new Error('批请求 note 必须是字符串');
 
@@ -22291,7 +22308,23 @@
       }
     },
 
-    /** 学习页路由指纹（与参考扩展一致：顶层地址 + 主框架 src + 主框架文档地址） */
+    /** 同一学习页的相对/绝对地址、参数顺序和缓存刷新参数不应触发队列重置。 */
+    routeUrlKey(href, base = location.href) {
+      if (!href) return '';
+      try {
+        const url = new URL(href, base);
+        // 只忽略 cards 页的缓存参数，保留章节、任务卡、课程及其他业务参数。
+        if (/\/knowledge\/cards\/?$/.test(url.pathname)) {
+          for (const name of ['_dc', '_t', '_']) url.searchParams.delete(name);
+        }
+        url.searchParams.sort();
+        return url.href;
+      } catch (e) {
+        return String(href);
+      }
+    },
+
+    /** 学习页路由指纹：顶层地址 + 主框架 src + 主框架文档地址（规范化后比较）。 */
     routeInfo() {
       const fr = this.studyIframe();
       const href = location.href;
@@ -22307,7 +22340,7 @@
         href,
         iframeSrc,
         mainDocumentHref: docHref,
-        key: `${href}|${iframeSrc}|${docHref}`
+        key: [this.routeUrlKey(href), this.routeUrlKey(iframeSrc, document.baseURI || href), this.routeUrlKey(docHref)].join('|')
       };
     },
 
@@ -24372,7 +24405,7 @@
       };
     }
 
-    /** 共用批处理：每请求最多 4 题；按 ID 填入，缺失/非法答案计失败而非猜测。 */
+    /** 共用批处理：限量并发请求，全部收齐后串行填答；缺失/非法答案不猜测。 */
     async solveQuestionBatches(elements, config, { label, extract, fill, stopped = () => false, fontProtection = false }) {
       let ok = 0, failed = 0, reader = null;
       const plainText = el => el?.innerText || '';
@@ -24393,52 +24426,78 @@
           return { ok, failed: elements.length, aborted: false };
         }
       }
-      for (let start = 0; start < elements.length; start += 4) {
-        if (stopped()) return { ok, failed, aborted: true };
-        const batch = [];
-        for (let i = start; i < Math.min(start + 4, elements.length); i++) {
-          try {
-            reader?.assertCurrent();
-            const data = extract(elements[i], reader ? reader.readText : plainText);
-            if (!String(data.stem || '').trim()) throw new Error('题干为空');
-            batch.push({ ...data, id: `q${i + 1}`, title: data.stem, element: elements[i] });
-          } catch (err) {
-            failed++;
-            AppState.log(`[${label} ${i + 1}] 题目提取失败: ${err.message}`, 'error');
-          }
-        }
-        if (batch.length) {
-          AppState.setStatus(`正在解答${label} ${start + 1}-${start + batch.length}/${elements.length}...`);
-          let answers;
-          try {
-            reader?.assertCurrent();
-            answers = await requestQuestionBatch(batch.map(({ id, type, title, options }) => ({ id, type, title, options })), config);
-            reader?.assertCurrent();
-          } catch (err) {
-            answers = null;
-            failed += batch.length;
-            AppState.log(`[${label}] 本批请求/JSON 解析失败: ${err.message}`, 'error');
-          }
-          if (stopped()) return { ok, failed, aborted: true };
-          if (answers) {
-            for (const question of batch) {
-              if (stopped()) return { ok, failed, aborted: true };
-              try {
-                reader?.assertCurrent();
-                if (question.element.isConnected === false) throw new Error('题目已离开页面');
-                if (!answers.has(question.id)) throw new Error('JSON 答案缺失或无效');
-                const answer = answers.get(question.id);
-                if (!await fill(question.element, question, answer)) throw new Error('答案未能填入或选中状态校验失败');
-                ok++;
-                AppState.log(`[${label} ${question.id.slice(1)}] ${question.type} → ${JSON.stringify(answer)}`);
-              } catch (err) {
-                failed++;
-                AppState.log(`[${label} ${question.id.slice(1)}] 作答失败: ${err.message}`, 'error');
-              }
+      // 某个并发槽观察到取消后，整个任务保持取消；重新开启助手不能复活旧请求。
+      const stopRequested = stopped;
+      let aborted = false;
+      stopped = () => (aborted = aborted || stopRequested());
+
+      // 调度参数使用本次配置快照；修改面板只影响下一次答题。
+      const { batchSize, concurrency } = getCxRequestSettings(config);
+      const batches = [];
+      let nextStart = 0;
+      const requestWorker = async () => {
+        while (nextStart < elements.length) {
+          if (stopped()) return;
+          const start = nextStart;
+          nextStart += batchSize;
+          const batch = [];
+          const result = { batch, answers: null };
+          batches[start / batchSize] = result;
+          for (let i = start; i < Math.min(start + batchSize, elements.length); i++) {
+            try {
+              reader?.assertCurrent();
+              const data = extract(elements[i], reader ? reader.readText : plainText);
+              if (!String(data.stem || '').trim()) throw new Error('题干为空');
+              batch.push({ ...data, id: `q${i + 1}`, title: data.stem, element: elements[i] });
+            } catch (err) {
+              failed++;
+              AppState.log(`[${label} ${i + 1}] 题目提取失败: ${err.message}`, 'error');
             }
           }
+          if (batch.length) {
+            AppState.setStatus(`正在解答${label} ${start + 1}-${Math.min(start + batchSize, elements.length)}/${elements.length}（${concurrency} 路并发）...`);
+            try {
+              if (stopped()) return;
+              reader?.assertCurrent();
+              result.answers = await requestQuestionBatch(
+                batch.map(({ id, type, title, options }) => ({ id, type, title, options })), config
+              );
+              if (stopped()) return;
+              reader?.assertCurrent();
+            } catch (err) {
+              result.answers = null;
+              failed += batch.length;
+              AppState.log(`[${label} ${start + 1}-${Math.min(start + batchSize, elements.length)}] 本批请求/JSON 解析失败: ${err.message}`, 'error');
+            }
+          }
+          if (stopped()) return;
+          // 保留每个请求槽的节流间隔；其他槽无需等待本批响应。
+          if (nextStart < elements.length) await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
         }
-        if (start + 4 < elements.length) await skjSleep(Math.max(800, Number(config.solveInterval) || 1500));
+      };
+      const workers = Math.min(concurrency, Math.ceil(elements.length / batchSize));
+      // 取消时也等待已发出的请求收尾，避免释放单飞锁后旧请求与新任务叠加。
+      await Promise.all(Array.from({ length: workers }, () => requestWorker()));
+      if (stopped()) return { ok, failed, aborted: true };
+
+      // 请求完成顺序不决定填答顺序，DOM 操作与最后的暂存/提交都保持串行。
+      for (const { batch, answers } of batches) {
+        if (!answers) continue;
+        for (const question of batch) {
+          if (stopped()) return { ok, failed, aborted: true };
+          try {
+            reader?.assertCurrent();
+            if (question.element.isConnected === false) throw new Error('题目已离开页面');
+            if (!answers.has(question.id)) throw new Error('JSON 答案缺失或无效');
+            const answer = answers.get(question.id);
+            if (!await fill(question.element, question, answer)) throw new Error('答案未能填入或选中状态校验失败');
+            ok++;
+            AppState.log(`[${label} ${question.id.slice(1)}] ${question.type} → ${JSON.stringify(answer)}`);
+          } catch (err) {
+            failed++;
+            AppState.log(`[${label} ${question.id.slice(1)}] 作答失败: ${err.message}`, 'error');
+          }
+        }
       }
       return { ok, failed, aborted: stopped() };
     }
@@ -24666,6 +24725,10 @@
         });
         if (!canSubmit()) return 'cancelled';
         if (popup) {
+          // 给平台弹窗事件绑定/重绘留出时间；等待后重新校验开关、弹窗及提示内容。
+          await skjSleep(300);
+          if (!canSubmit() || popup.isConnected === false || !skjIsDeepVisible(popup) ||
+              this.findVisiblePopup([doc]) !== popup) return 'cancelled';
           const content = this.readPopupContent([doc], popup);
           if (/未做完|未完成|未作答|漏答/.test(content)) {
             this.clickPopupButton([doc], '#popno, .popno', popup);
@@ -24704,6 +24767,9 @@
           if (!canSubmit()) return 'cancelled';
           const focusPopup = followup?.popup;
           if (focusPopup) {
+            await skjSleep(300);
+            if (!canSubmit() || focusPopup.isConnected === false || !skjIsDeepVisible(focusPopup) ||
+                (this.findFocusPopup([doc]) || this.findVisiblePopup([doc])) !== focusPopup) return 'cancelled';
             const focusText = this.readPopupContent([doc], focusPopup);
             if (/未做完|未完成|未作答|漏答/.test(focusText)) {
               this.clickPopupButton([doc], '#popno, .popno', focusPopup);
@@ -24862,6 +24928,9 @@
           AppState.log('未检测到提交确认弹窗（可能已直接提交）', 'warn');
           return;
         }
+        await skjSleep(300);
+        if (!canSubmit() || popup.isConnected === false || !skjIsDeepVisible(popup) ||
+            this.findVisiblePopup() !== popup) return;
         const content = this.readPopupContent([], popup);
         if (/未做完|未完成|未作答|漏答/.test(content)) {
           this.clickPopupButton([], '#popno, .popno', popup);
@@ -25444,6 +25513,7 @@
       modal.id = 'skj-modal';
 
       const cfg = getConfig();
+      const cxRequestSettings = getCxRequestSettings(cfg);
       const escapeAttribute = (value) => skjEscapeHtml(value).replace(/"/g, '&quot;');
       const visionEnabled = cfg.cxFontStrategy === 'vision';
       const independentVision = visionEnabled && cfg.cxVisionUseMain === false;
@@ -25453,7 +25523,7 @@
           <div class="skj-header">
             <div class="skj-header-title">
               <span>🤖 刷课酱控制台</span>
-              <span class="skj-badge">v2.2.0</span>
+              <span class="skj-badge">v2.2.1</span>
             </div>
             <button class="skj-close" id="skj-close-btn">&times;</button>
           </div>
@@ -25587,6 +25657,20 @@
                 <span>已默认开启【自动提交】，答题完毕后将自动确认提交。如需人工检查核对，可在此处关闭此开关。</span>
               </div>
 
+              <div class="skj-form-item">
+                <label class="skj-form-label" for="skj-cfg-cxBatchSize">单次请求题目数（自动保存）</label>
+                <input type="number" class="skj-input" id="skj-cfg-cxBatchSize" min="1" max="${CX_MAX_BATCH_SIZE}" step="1" value="${cxRequestSettings.batchSize}">
+                <div class="skj-form-desc">默认 4 题，仅对超星章节测验与作业/考试批量解题生效。</div>
+              </div>
+
+              <div class="skj-form-item">
+                <label class="skj-form-label" for="skj-cfg-cxConcurrency">API 并发请求数（自动保存）</label>
+                <input type="number" class="skj-input" id="skj-cfg-cxConcurrency" min="1" max="${CX_MAX_CONCURRENCY}" step="1" value="${cxRequestSettings.concurrency}">
+                <div class="skj-form-desc">默认 3 并发，设为 1 即串行；仅对超星章节测验与作业/考试批量解题生效。</div>
+              </div>
+              <div class="skj-form-desc">以上配置下次答题生效，不影响正在进行的请求；参数过高可能触发 API 限流。</div>
+              <div class="skj-form-desc" id="skj-save-tip" aria-live="polite"></div>
+
               <div style="margin-top: 18px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: #334155; display: flex; align-items: center; gap: 6px;">
                 <span>🔑</span>
                 <span>大模型 API 接口参数设置 (需手动保存)</span>
@@ -25706,6 +25790,8 @@
         'skj-cfg-playbackRate',
         'skj-cfg-examEnabled',
         'skj-cfg-autoSubmit',
+        'skj-cfg-cxBatchSize',
+        'skj-cfg-cxConcurrency',
         'skj-cfg-cxFontStrategy',
         'skj-cfg-cxVisionUseMain'
       ];
@@ -25757,6 +25843,17 @@
      * 保存常规开关与选择设置（实时自动保存）
      */
     saveGeneralSettings(changedKey = null) {
+      if (changedKey === 'cxBatchSize' || changedKey === 'cxConcurrency') {
+        const input = document.getElementById('skj-cfg-' + changedKey);
+        const cfg = getConfig();
+        const settings = getCxRequestSettings({ [changedKey]: input?.value ?? cfg[changedKey] });
+        const value = changedKey === 'cxBatchSize' ? settings.batchSize : settings.concurrency;
+        setConfig({ [changedKey]: value });
+        if (input) input.value = String(value);
+        // 下次答题才采用新参数，不重启助手或取消当前请求。
+        this.showSaveTip('设置已实时自动保存，下次答题生效');
+        return;
+      }
       const rateEl = document.getElementById('skj-cfg-playbackRate');
       const cfg = getConfig();
       const strategyEl = document.getElementById('skj-cfg-cxFontStrategy');
