@@ -143,7 +143,8 @@
 │       └── uiController.js     # 悬浮胶囊球拖拽、设置模态窗与控制台交互
 ├── scripts/
 │   ├── build.js                # 零依赖自动化打包脚本 (支持 --watch 热重载)
-│   └── check.js                # CI 质量校验与语法/元数据完整性测试
+│   ├── check.js                # CI 质量校验与语法/元数据完整性测试
+│   └── release-check.js        # 主脚本版本一致性与 vX.Y.Z 标签校验
 ├── shuakejiang.user.js          # 打包生成的生产就绪油猴用户脚本
 ├── package.json
 └── README.md
@@ -176,6 +177,16 @@ npm run test:exam
 # 字体策略、多模态 API 与配置面板离线回归测试
 npm run test:font
 ```
+
+---
+
+## CI / CD 自动发版
+
+- **普通 push 到 `main` / 面向 `main` 的 PR**：只运行 CI（版本一致性、构建、产物同步及全部测试），不创建 Release。
+- **push 新的 `vX.Y.Z` 标签**：运行 CD，复用 CI 验证标签提交；全部通过后自动创建 GitHub Release 并上传已验证的 `shuakejiang.user.js`。
+- 标签版本必须与 `package.json`、`src/header.js`、生成脚本一致；失败不发布，不覆盖已有 Release。
+
+发版时不再需要手动执行 `gh release create`。具体步骤和更新渠道区别见 [CI / CD 与发版流程](docs/releasing.md)。
 
 ---
 

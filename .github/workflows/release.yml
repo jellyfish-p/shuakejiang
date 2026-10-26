@@ -1,0 +1,66 @@
+name: Userscript CD
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+# A rerun/duplicate delivery must not race another publisher for the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate tagged commit
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish GitHub Release
+    needs: validate
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download validated artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: userscript-release
+          path: dist
+
+      - name: Verify tag and artifact before publishing
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)"
+          node scripts/release-check.js "$RELEASE_TAG" dist/shuakejiang.user.js
+          cmp shuakejiang.user.js dist/shuakejiang.user.js
+          sha256sum dist/shuakejiang.user.js
+
+      - name: Create release and upload userscript
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/shuakejiang.user.js \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "刷课酱 $RELEASE_TAG" \
+            --generate-notes \
+            --notes '安装或更新请使用附件 shuakejiang.user.js；功能说明和使用限制请查看本标签中的 README.md。'

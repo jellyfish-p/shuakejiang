@@ -1,41 +1,54 @@
-name: Userscript CI & Release
+name: Userscript CI
 
 on:
   push:
     branches:
       - main
-    paths:
-      - 'src/**'
-      - 'scripts/**'
-      - 'shuakejiang.user.js'
-      - 'package.json'
-      - '.github/workflows/**'
   pull_request:
     branches:
       - main
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   validate:
     name: Build & Quality Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      - name: Check version metadata and release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: node scripts/release-check.js "$RELEASE_TAG"
+
       - name: Build Userscript
-        run: |
-          node scripts/build.js
+        run: npm run build
 
       - name: Check Build Sync
         run: |
           git diff --exit-code shuakejiang.user.js || (echo "❌ shuakejiang.user.js 与 src/ 源码不一致，请在提交前执行 npm run build！" && exit 1)
 
       - name: Run Quality Tests
-        run: |
-          npm test
+        run: npm test
 
+      # Called by the tag CD workflow: publish exactly the artifact validated above.
+      - name: Upload validated release artifact
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: userscript-release
+          path: shuakejiang.user.js
+          if-no-files-found: error
+          retention-days: 7

@@ -6,11 +6,12 @@
   "scripts": {
     "build": "node scripts/build.js",
     "watch": "node scripts/build.js --watch",
-    "test": "node scripts/check.js && npm run test:races && npm run test:lifecycle && npm run test:exam && npm run test:font",
+    "test": "node scripts/check.js && npm run test:races && npm run test:lifecycle && npm run test:exam && npm run test:font && npm run test:release",
     "test:races": "node scripts/race-check.js",
     "test:lifecycle": "node scripts/lifecycle-check.js",
     "test:exam": "node scripts/exam-check.js",
-    "test:font": "node scripts/font-check.js && node scripts/font-api-check.js"
+    "test:font": "node scripts/font-check.js && node scripts/font-api-check.js",
+    "test:release": "node scripts/release-check.js && node scripts/release-check.test.js"
   },
   "keywords": [
     "userscript",
