@@ -459,6 +459,9 @@ class ExamAssistant {
         AppState.log('未找到测验提交按钮，已保留暂存结果', 'warn');
         return 'saved';
       }
+      // 填答/暂存完成后稍等，给平台同步答案状态的时间，再点击提交。
+      await skjSleep(500);
+      if (!canSubmit()) return 'cancelled';
       if (!skjHumanClick(submitBtn)) return 'error';
 
       // 3) 结果弹窗判定（对齐参考扩展：未做完 / 未达到及格线 自动取消）
@@ -665,6 +668,9 @@ class ExamAssistant {
       if ((!allowDisabled && !getConfig().examEnabled) || !getConfig().autoSubmit) return;
       const completeBtn = document.querySelector('a.completeBtn, .btnSubmit');
       if (!completeBtn) return;
+      // 填答/暂存完成后稍等，给独立作业页同步答案状态的时间，再点击提交。
+      await skjSleep(500);
+      if (!canSubmit()) return;
       skjHumanClick(completeBtn);
       const popup = await skjWaitFor(() => this.findVisiblePopup(), { timeout: 8000, interval: 250, cancelled: () => !canSubmit() });
       if (!canSubmit()) return;

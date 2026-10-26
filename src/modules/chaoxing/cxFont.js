@@ -6,6 +6,8 @@ const CxFont = (() => {
   const HAN = /\p{Script=Han}/u;
   const MAX_FONT_BYTES = 8 * 1024 * 1024;
   const MAX_CHARS = 2000;
+  const VISION_CACHE_VERSION = 1;
+  const VISION_CACHE_PREFIX = 'skj-cx-font-vision-v1:';
   let fontSequence = 0;
 
   const plainText = el => String(el?.innerText ?? el?.textContent ?? '');
@@ -111,15 +113,86 @@ const CxFont = (() => {
     return map;
   }
 
+  function visionCacheStorage(doc) {
+    try {
+      return doc?.defaultView?.sessionStorage || globalThis.sessionStorage || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function isDecodedHan(value) {
+    return typeof value === 'string' && Array.from(value).length === 1 && hasHan(value);
+  }
+
+  function visionCacheKey(face, visionConfig) {
+    try {
+      const signature = JSON.stringify({
+        font: face.base64,
+        baseUrl: visionConfig.openaiBaseUrl,
+        model: visionConfig.openaiModel,
+        temperature: visionConfig.openaiTemperature,
+        apiKey: visionConfig.openaiApiKey
+      });
+      const hash = CX_FONT_LIB.md5(signature);
+      return `${VISION_CACHE_PREFIX}${hash}`;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /** 会话级只读结果缓存：不写入图片、题目、API Key 或 DOM 文本。 */
+  function readVisionCache(face, visionConfig) {
+    const storage = visionCacheStorage(face.doc), key = visionCacheKey(face, visionConfig);
+    if (!storage || !key) return new Map();
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) return new Map();
+      const payload = JSON.parse(raw);
+      if (!payload || payload.version !== VISION_CACHE_VERSION || !payload.map ||
+          typeof payload.map !== 'object' || Array.isArray(payload.map)) return new Map();
+      const map = new Map();
+      for (const [source, value] of Object.entries(payload.map)) {
+        if (Array.from(source).length === 1 && hasHan(source) && isDecodedHan(value)) map.set(source, value);
+      }
+      return map;
+    } catch (e) {
+      return new Map();
+    }
+  }
+
+  function writeVisionCache(face, visionConfig, map) {
+    const storage = visionCacheStorage(face.doc), key = visionCacheKey(face, visionConfig);
+    if (!storage || !key || !map.size) return;
+    try {
+      const payload = { version: VISION_CACHE_VERSION, map: {} };
+      for (const [source, value] of map) {
+        if (Array.from(source).length === 1 && hasHan(source) && isDecodedHan(value)) {
+          payload.map[source] = value;
+        }
+      }
+      storage.setItem(key, JSON.stringify(payload));
+    } catch (e) {
+      // sessionStorage 可能被禁用或已满；缓存失败不影响本次识别。
+    }
+  }
+
   async function visionMap(face, config, cancelled) {
     const doc = face.doc, win = doc.defaultView;
+    // 上传之前验证配置；不会把独立模式的空参数偷偷换成主 API。
+    const visionConfig = resolveCxVisionConfig(config);
+    const chars = Array.from(face.chars);
+    const map = readVisionCache(face, visionConfig);
+    const missing = chars.filter(ch => !map.has(ch));
+    if (!missing.length) {
+      checkCancelled(cancelled);
+      return map;
+    }
+
     const FontFaceClass = win?.FontFace || globalThis.FontFace;
     if (!FontFaceClass || !doc.fonts?.add || !doc.fonts?.delete) throw new Error('浏览器不支持识图所需的字体加载接口');
-    // 上传之前验证配置；不会把独立模式的空参数偷偷换成主 API。
-    resolveCxVisionConfig(config);
     const family = `skj-cx-vision-${++fontSequence}`;
     const font = new FontFaceClass(family, fontBytes(face).buffer);
-    const map = new Map();
     let timer;
     try {
       await Promise.race([
@@ -129,10 +202,9 @@ const CxFont = (() => {
       clearTimeout(timer);
       checkCancelled(cancelled);
       doc.fonts.add(font);
-      const chars = Array.from(face.chars);
-      for (let start = 0; start < chars.length; start += 40) {
+      for (let start = 0; start < missing.length; start += 40) {
         checkCancelled(cancelled);
-        const chunk = chars.slice(start, start + 40);
+        const chunk = missing.slice(start, start + 40);
         const ids = chunk.map((_, i) => `g${i + 1}`);
         const canvas = doc.createElement('canvas');
         const columns = Math.min(8, chunk.length);
@@ -166,6 +238,7 @@ const CxFont = (() => {
         // 图片仅包含编号和单字，不上传页面、账号、课程链接或表单。
         canvas.width = canvas.height = 0;
       }
+      writeVisionCache(face, visionConfig, map);
       return map;
     } finally {
       clearTimeout(timer);

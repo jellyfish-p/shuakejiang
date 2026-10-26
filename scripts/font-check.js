@@ -51,8 +51,15 @@ function unit(f, overrides = {}) {
   const md5 = text => crypto.createHash('md5').update(text).digest('hex');
   const table = Object.fromEntries(paths.map((p, i) => [md5(JSON.stringify(p)).slice(24), '中文'.codePointAt(i)]));
   const calls = [];
+  const sessionData = overrides.sessionData || new Map();
+  const sessionStorage = {
+    getItem: key => sessionData.has(key) ? sessionData.get(key) : null,
+    setItem: (key, value) => sessionData.set(key, String(value)),
+    removeItem: key => sessionData.delete(key)
+  };
+  f.r.win.sessionStorage = sessionStorage;
   const sandbox = vm.createContext({
-    Uint8Array, setTimeout, clearTimeout,
+    Uint8Array, setTimeout, clearTimeout, sessionStorage,
     CX_FONT_LIB: { md5, Typr: {
       parse: bytes => [{ cmap: {}, alternate: bytes[0] === 66 }],
       U: { codeToGlyph: (font, cp) => cp === 0x7532 ? (font.alternate ? 2 : 1) : cp === 0x4e59 ? 2 : cp === 0x4e19 ? 3 : 0,
@@ -64,7 +71,7 @@ function unit(f, overrides = {}) {
     ...overrides
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/modules/chaoxing/cxFont.js'), 'utf8') + '\nglobalThis.font = CxFont;', sandbox);
-  return { font: sandbox.font, calls, sandbox };
+  return { font: sandbox.font, calls, sandbox, sessionData };
 }
 
 const compact = text => text.replace(/\s+/g, '');
@@ -142,6 +149,32 @@ test('vision generates numbered glyph-only grids, splits at forty, and releases 
   assert.equal(compact(reader.readText(f.root)), '中'.repeat(41));
   assert.equal(f.encoded.innerText, chars);
   assert.equal(f.fontSet.size, 0);
+});
+
+test('vision decoding reuses valid results from sessionStorage across page instances', async () => {
+  const config = {
+    cxFontStrategy: 'vision', openaiBaseUrl: 'https://vision.example.invalid/v1',
+    openaiApiKey: 'session-only-api-key', openaiModel: 'vision-model'
+  };
+  const first = fixture(undefined, '甲乙', 'same-font');
+  const one = unit(first);
+  const reader = await one.font.prepare([first.root], config);
+  assert.equal(one.calls.length, 1);
+  assert.equal(compact(reader.readText(first.root)), '中中');
+  assert.equal(one.sessionData.size, 1);
+  assert.ok(!JSON.stringify(Array.from(one.sessionData)).includes(config.openaiApiKey), 'cache must not store the API key');
+
+  const second = fixture(undefined, '甲乙', 'same-font');
+  const two = unit(second, { sessionData: one.sessionData });
+  second.r.win.FontFace = undefined;
+  const cached = await two.font.prepare([second.root], config);
+  assert.equal(two.calls.length, 0, 'same font/config must reuse the session result');
+  assert.equal(compact(cached.readText(second.root)), '中中');
+
+  const changedConfig = { ...config, openaiModel: 'different-vision-model' };
+  second.r.win.FontFace = class { load() { return Promise.resolve(this); } };
+  await two.font.prepare([second.root], changedConfig);
+  assert.equal(two.calls.length, 1, 'changing visual API config must use a separate cache entry');
 });
 
 test('cancellation during vision prevents later uploads and ignores late results', async () => {

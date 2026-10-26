@@ -223,6 +223,17 @@ test('a click with no selected-state change must not count as a completed answer
   assert.equal(await ea.fillCxQuestion(q, '单选题', 'A', [el]), false);
 });
 
+test('filled chapter waits 500ms after saving before clicking submit', async () => {
+  const r = runtime(), d = r.doc(), ea = new r.ExamAssistant(), ui = submission(r, d);
+  const pending = ea.saveCxWork(d, { submit: true });
+  await r.advance(1699);
+  assert.equal(ui.save.clicks, 1); assert.equal(ui.submit.clicks, 0);
+  await r.advance(1);
+  assert.equal(ui.submit.clicks, 1);
+  await r.advance(30000);
+  assert.equal(await pending, 'submitted');
+});
+
 test('submission click preserves javascript href used by Chaoxing action links', async () => {
   const r = runtime(), ea = new r.ExamAssistant(), d = r.doc(), submit = r.node();
   submit.ownerDocument = d; submit.attrs.href = 'javascript:submitCheck();';
@@ -573,7 +584,7 @@ test('submit and successive popup confirmations are separated by at least 300ms'
       .select('.testTit_status, .ceyan_status', r.node('已提交'));
   });
   const pending = ea.saveCxWork(d, { submit: true });
-  await r.advance(1499); assert.equal(ui.ok.clicks, 0);
+  await r.advance(1999); assert.equal(ui.ok.clicks, 0);
   await r.advance(1); assert.equal(ui.ok.clicks, 1);
   await r.advance(299); assert.equal(ui.ok.clicks, 1);
   await r.advance(1); assert.equal(ui.ok.clicks, 2);
@@ -589,7 +600,7 @@ for (const phase of ['first', 'followup']) {
       d.select('.btnSubmit.workBtnIndex, .btnSubmit', submit);
       ui.ok.addEventListener('click', () => { ui.content.innerText = '再次确认提交？'; });
       const pending = ea.saveCxWork(d, { submit: true });
-      await r.advance(phase === 'first' ? 1300 : 1600);
+      await r.advance(phase === 'first' ? 1800 : 2100);
       if (action === 'disable') r.setConfig({ autoSubmit: false });
       if (action === 'warning') ui.content.innerText = '仍有题目未作答';
       if (action === 'removed') {
@@ -612,7 +623,9 @@ for (const action of ['confirm', 'disable', 'warning', 'removed', 'route']) {
     ui.popup.select('#popok, .popBottom .confirm, .popok', ui.ok);
     let cancelled = false;
     const pending = ea.saveQuestionLiPage(r.getConfig(), 0, false, () => cancelled);
-    await r.advance(100);
+    await r.advance(499);
+    assert.equal(submit.clicks, 0); assert.equal(ui.ok.clicks, 0);
+    await r.advance(1);
     assert.equal(submit.clicks, 1); assert.equal(ui.ok.clicks, 0);
     if (action === 'disable') r.setConfig({ autoSubmit: false });
     if (action === 'warning') ui.content.innerText = '还有题目未作答';
