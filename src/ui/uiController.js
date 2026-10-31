@@ -105,7 +105,7 @@ class UIController {
         <div class="skj-header">
           <div class="skj-header-title">
             <span>🤖 刷课酱控制台</span>
-            <span class="skj-badge">v2.2.4</span>
+            <span class="skj-badge">v2.2.5</span>
           </div>
           <button class="skj-close" id="skj-close-btn">&times;</button>
         </div>
@@ -459,12 +459,14 @@ class UIController {
     this.updateCxVisionSettings();
     this.videoAssist.optionsChanged?.();
 
-    // 立即向当前页面所有视频同步新设定的倍速和静音状态
+    // 智慧树 StuStudy 的官方播放器不支持脚本侧调速；按原插件行为固定原速，
+    // 避免设置面板直接写 playbackRate 破坏播放器状态。静音仍同步到媒体元素。
     const videos = this.videoAssist.findMediaElements();
     for (const v of videos) {
       v.muted = !!newCfg.muted;
-      this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
+      if (!Site.isZhihuishu) this.videoAssist.applyPlaybackRate(v, newCfg.playbackRate);
     }
+    if (Site.isZhihuishu) this.videoAssist.zhsApplyControlBarRate(1);
 
     this.showSaveTip('✅ 设置已实时自动保存并生效');
   }

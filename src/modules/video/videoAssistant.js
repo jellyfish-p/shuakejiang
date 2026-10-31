@@ -17,7 +17,6 @@ class VideoAssistant {
     this._lifecycle = 0;
     this._lastHref = '';
     this._msgBound = false;
-    this._zhsBridgeInjected = false;
     this._zhsQuizTimer = null;
     this._zhsQuizBusy = false;
     this._zhsCompleted = false;
@@ -83,7 +82,8 @@ class VideoAssistant {
     } catch (e) {
       AppState.log('运行异常: ' + (e && e.message ? e.message : e), 'error');
     }
-    this.timer = setTimeout(() => this.loop(), 1500);
+    // 原始智慧树播放器每约 500ms 检查一次暂停状态；其他平台保持较低频率。
+    this.timer = setTimeout(() => this.loop(), Site.isZhihuishu ? 500 : 1500);
   }
 
   /* ---------------------------------------------------------------------
@@ -103,15 +103,18 @@ class VideoAssistant {
   }
 
   tickZhihuishu(config) {
-    if (config.videoEnabled) {
-      this.zhsApplyControlBarRate(config.playbackRate);
-      this.processMedia(document, config, { autoJump: false });
-    }
     this.handlePauseArtifacts(document);
 
-    // 弹题是异步渲染的，可能在视频结束前后任意时刻出现。只要弹窗还在，
-    // 就不能先切换小节；独立轮询器会负责发现并处理它。
+    // 弹题出现时不要对后台视频再次调用 play()；独立轮询器会负责发现并处理它。
+    // 弹题通常在视频结束后出现，但不依赖 ended 时机。
     if (this.zhsPopupDialog()) return;
+
+    if (config.videoEnabled) {
+      // 原始智慧树插件在 StuStudy 页面固定原速；只通过控制栏兜底回到 1.0x，
+      // 不直接写媒体 playbackRate。
+      this.zhsApplyControlBarRate(1);
+      this.processMedia(document, config, { autoJump: false });
+    }
     if (!config.videoEnabled || !config.autoNext) return;
     if (this._zhsCompleted) return;
     if (Date.now() < this._jumpLock) return;
@@ -122,7 +125,9 @@ class VideoAssistant {
     if (!active) return;
 
     const media = this.zhsCurrentVideo();
-    const ended = media ? CxDom.isMediaFinished(media) || this.zhsControlBarEnded() : this.zhsControlBarEnded();
+    // 不使用 controlsBar 文本作为结束信号：播放器重绘期间可能保留旧时间，
+    // 误判会直接点击下一节甚至结束当前页面。只相信真实媒体状态。
+    const ended = !!media && CxDom.isMediaFinished(media);
     const done = this.zhsIsSectionDone(active) && config.skipFinished;
     if (!ended && !done) return;
 
@@ -137,9 +142,10 @@ class VideoAssistant {
 
   tickIsolatedFrame(config) {
     if (!config.videoEnabled) return;
-    if (Site.isZhihuishu) this.zhsApplyControlBarRate(config.playbackRate);
-    this.processMedia(document, config, { autoJump: false, notifyTop: true });
     this.handlePauseArtifacts(document);
+    if (Site.isZhihuishu && this.zhsPopupDialog()) return;
+    if (Site.isZhihuishu) this.zhsApplyControlBarRate(1);
+    this.processMedia(document, config, { autoJump: false, notifyTop: true });
   }
 
   bindCrossFrameMessages() {
@@ -150,8 +156,13 @@ class VideoAssistant {
       if (!data || data.type !== 'skj:media-ended' || !this.isTrustedMediaMessage(event)) return;
       const config = getConfig();
       if (!config.videoEnabled || !config.autoNext) return;
-      AppState.log('子框架视频播放完成，准备跳转下一节...');
-      this.scheduleGenericNext(2000);
+      if (Site.isZhihuishu) {
+        AppState.log('智慧树子框架视频播放完成，准备跳转下一节...');
+        this.scheduleZhihuishuNext(2000);
+      } else {
+        AppState.log('子框架视频播放完成，准备跳转下一节...');
+        this.scheduleGenericNext(2000);
+      }
     });
   }
 
@@ -174,6 +185,19 @@ class VideoAssistant {
       const config = getConfig();
       if (!config.videoEnabled || !config.autoNext) return;
       this.genericNavigateNext(config);
+    }, delay);
+  }
+
+  scheduleZhihuishuNext(delay = 2000) {
+    const lifecycle = this._lifecycle;
+    const href = location.href;
+    setTimeout(() => {
+      if (!this.active || lifecycle !== this._lifecycle || location.href !== href) return;
+      const config = getConfig();
+      if (!config.videoEnabled || !config.autoNext || this.zhsPopupDialog()) return;
+      const sections = this.zhsSections();
+      const active = this.zhsActiveSection(sections);
+      if (active) this.zhsNavigateNext(sections, active, config);
     }, delay);
   }
 
@@ -617,26 +641,6 @@ class VideoAssistant {
     return false;
   }
 
-  zhsControlBarEnded() {
-    try {
-      const bar = skjCollectDocs(document)
-        .map((doc) => doc.querySelector('.controlsBar'))
-        .find(Boolean);
-      const current = bar?.querySelector('.currentTime')?.innerText || '';
-      const duration = bar?.querySelector('.duration')?.innerText || '';
-      const parse = (value) => {
-        const parts = String(value).trim().split(':').map(Number);
-        if (!parts.length || parts.some((part) => !Number.isFinite(part))) return NaN;
-        return parts.reduce((total, part) => total * 60 + part, 0);
-      };
-      const now = parse(current);
-      const total = parse(duration);
-      return total > 0 && now >= total - 0.5;
-    } catch (e) {
-      return false;
-    }
-  }
-
   zhsNavigateNext(sections, active, config) {
     if (Date.now() < this._jumpLock) return;
     const list = sections || this.zhsSections();
@@ -719,9 +723,10 @@ class VideoAssistant {
       });
     }
 
-    if (this.zhsAnswerPopupQuizDirect(dialog)) return true;
-    this.ensureZhsQuizBridge();
-    return true;
+    // 不再注入页面级轮询脚本。原始插件只在特定旧版页面提供一次性 MAIN
+    // world bridge；持续 setInterval 注入会干扰新版播放器生命周期。旧版弹题
+    // 若无法直接读取 Vue 实例则保留给用户手动处理，不影响视频播放。
+    return this.zhsAnswerPopupQuizDirect(dialog);
   }
 
   zhsPopupQuestions(dialog) {
@@ -890,27 +895,6 @@ class VideoAssistant {
     }
   }
 
-  ensureZhsQuizBridge() {
-    if (this._zhsBridgeInjected) return;
-    this._zhsBridgeInjected = true;
-    skjLogOnce('zhs-quiz-bridge', '检测到智慧树视频弹题，正在尝试自动作答...');
-    const code = `(${zhsQuizBridge.toString()})();`;
-    try {
-      if (typeof GM_addElement === 'function') {
-        GM_addElement(document.documentElement, 'script', { textContent: code });
-        return;
-      }
-    } catch (e) {}
-    try {
-      const s = document.createElement('script');
-      s.textContent = code;
-      (document.head || document.documentElement).appendChild(s);
-      s.remove();
-    } catch (e) {
-      AppState.log('智慧树弹题自动作答桥接注入失败（可能被 CSP 拦截），请手动完成弹题', 'warn');
-    }
-  }
-
   /* ---------------------------------------------------------------------
    * 其他平台：下一节跳转
    * ------------------------------------------------------------------- */
@@ -1060,58 +1044,4 @@ class VideoAssistant {
     }
     this.genericNavigateNext(config);
   }
-}
-
-/* =========================================================================
- * 智慧树视频弹题页面上下文桥接（对齐参考扩展 MAIN world 方案）
- * 该函数会被序列化后注入页面上下文执行，不可引用闭包变量
- * ========================================================================= */
-function zhsQuizBridge() {
-  var TOKEN = 'data-skj-zhs-quiz-key';
-  var warned = false;
-  setInterval(function () {
-    try {
-      var dialog = document.querySelector('#playTopic-dialog');
-      if (!dialog) return;
-      var st = window.getComputedStyle(dialog);
-      if (!st || st.display === 'none' || st.visibility === 'hidden') return;
-      var vue = dialog.__vue__ && dialog.__vue__.$parent && dialog.__vue__.$parent;
-      var info = vue && vue.topicInfo && vue.topicInfo.lessonTestQuestionUseInterfaceDtos;
-      var dto = info && info[0];
-      var options = dto && dto.testQuestion && dto.testQuestion.questionOptions;
-      var answers = dto && dto.answerUs;
-      if (!vue || !options || !options.length || !answers || !answers.length) return;
-      var key = String((dto.testQuestion && (dto.testQuestion.id || dto.testQuestion.questionId)) || answers.join(''));
-      if (dialog.getAttribute(TOKEN) === key) return;
-      dialog.setAttribute(TOKEN, key);
-
-      var matched = [];
-      for (var i = 0; i < options.length; i++) {
-        var opt = options[i];
-        if (opt && opt.sortUs && answers.indexOf(opt.sortUs) >= 0) matched.push(opt);
-      }
-      matched.forEach(function (opt, idx) {
-        setTimeout(function () {
-          try {
-            if (typeof vue.topicClickQot === 'function') vue.topicClickQot(opt);
-          } catch (e) {}
-        }, 500 * idx);
-      });
-      setTimeout(
-        function () {
-          try {
-            vue.testDialog = false;
-          } catch (e) {}
-        },
-        Math.max(1200, 500 * matched.length + 800)
-      );
-    } catch (e) {
-      if (!warned) {
-        warned = true;
-        try {
-          console.warn('[刷课酱] 智慧树弹题桥接异常', e);
-        } catch (e2) {}
-      }
-    }
-  }, 1500);
 }

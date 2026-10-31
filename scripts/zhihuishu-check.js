@@ -72,7 +72,32 @@ assert.equal(va.zhsApplyControlBarRate(1.5), true);
 assert.equal(fastTab.clicks, 1);
 assert.equal(fastTab.classList.contains('active'), true);
 
-// New AI exercise dialog markup: parse .item/.type/.question-info/.option and click B.
+// A video in a cross-origin player frame must route completion to the ZHS
+// section navigator, not the generic navigator/course-complete path.
+r.Site.isZhihuishu = true;
+const frame = r.node();
+frame.contentWindow = {};
+r.document.select('iframe, frame', [frame]);
+let navigated = false;
+va.active = true;
+va.zhsPopupDialog = () => null;
+va.zhsSections = () => [first, second];
+va.zhsActiveSection = () => first;
+va.zhsNavigateNext = () => { navigated = true; };
+va.bindCrossFrameMessages();
+r.message({ source: frame.contentWindow, data: { type: 'skj:media-ended' } });
+r.advance(2000).then(() => {
+  assert.equal(navigated, true);
+
+  // New AI exercise dialog markup: parse .item/.type/.question-info/.option and click B.
+  runModalChecks();
+}).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+
+function runModalChecks() {
+
 const bSelect = element(r, { classes: ['class-question-select'], onClick: node => node.classList.add('active') });
 const optionA = element(r, {
   selectors: { '.answer': element(r, { text: '140' }), '.class-question-select': element(r, { classes: ['class-question-select'] }) }
@@ -95,4 +120,5 @@ assert.equal(Array.from(questions[0].options).join('|'), '140|141');
 assert.equal(va.zhsFillPopupQuestion(questions[0], 'B'), true);
 assert.equal(bSelect.classList.contains('active'), true);
 
-console.log('Zhihuishu checks passed (3 cases).');
+console.log('Zhihuishu checks passed (4 cases).');
+}
