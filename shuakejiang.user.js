@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         刷课酱 - 网课视频助手 & AI 解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.2.3
+// @version      2.2.4
 // @description  刷课酱 - 超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；按当前页面任务点队列依次推进，视频结束后继续处理章节测验，不回头跳转旧章节，全部完成后自动停止；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
@@ -39,6 +39,11 @@
   function hookMediaWindow(win) {
     if (!win) return;
     try {
+      // 智慧树的倍速必须通过页面自己的 controlsBar 操作。若在这里重写
+      // playbackRate，control bar 的 speedTab 点击会被当成网页侧写入而丢弃。
+      const hostname = String(win.location?.hostname || '');
+      if (/zhihuishu\.com$/.test(hostname)) return;
+
       if (win._skj_media_hooked) return;
       win._skj_media_hooked = true;
 
@@ -23488,6 +23493,8 @@
       this._lastHref = '';
       this._msgBound = false;
       this._zhsBridgeInjected = false;
+      this._zhsQuizTimer = null;
+      this._zhsQuizBusy = false;
       this._zhsCompleted = false;
     }
 
@@ -23499,6 +23506,8 @@
       if (this.active) return;
       this.active = true;
       if (skjIsTopFrame()) this.bindCrossFrameMessages();
+      // 弹题可能挂在智慧树的视频子框架中，不能只让顶层页面轮询。
+      if (Site.isZhihuishu) this.startZhsQuizPolling();
       this.loop();
     }
 
@@ -23507,7 +23516,10 @@
       this._lifecycle += 1;
       this.cxRunner.cancelCurrent();
       if (this.timer) clearTimeout(this.timer);
+      if (this._zhsQuizTimer) clearTimeout(this._zhsQuizTimer);
       this.timer = null;
+      this._zhsQuizTimer = null;
+      this._zhsQuizBusy = false;
     }
 
     /** 页面切换或手动触发：强制重新识别任务点 */
@@ -23566,10 +23578,15 @@
     }
 
     tickZhihuishu(config) {
-      if (config.videoEnabled) this.processMedia(document, config, { autoJump: false });
-      if (config.autoSolveVideoQuiz) this.zhsSolvePopupQuiz(config);
+      if (config.videoEnabled) {
+        this.zhsApplyControlBarRate(config.playbackRate);
+        this.processMedia(document, config, { autoJump: false });
+      }
       this.handlePauseArtifacts(document);
 
+      // 弹题是异步渲染的，可能在视频结束前后任意时刻出现。只要弹窗还在，
+      // 就不能先切换小节；独立轮询器会负责发现并处理它。
+      if (this.zhsPopupDialog()) return;
       if (!config.videoEnabled || !config.autoNext) return;
       if (this._zhsCompleted) return;
       if (Date.now() < this._jumpLock) return;
@@ -23580,7 +23597,7 @@
       if (!active) return;
 
       const media = this.zhsCurrentVideo();
-      const ended = media ? CxDom.isMediaFinished(media) : false;
+      const ended = media ? CxDom.isMediaFinished(media) || this.zhsControlBarEnded() : this.zhsControlBarEnded();
       const done = this.zhsIsSectionDone(active) && config.skipFinished;
       if (!ended && !done) return;
 
@@ -23595,6 +23612,7 @@
 
     tickIsolatedFrame(config) {
       if (!config.videoEnabled) return;
+      if (Site.isZhihuishu) this.zhsApplyControlBarRate(config.playbackRate);
       this.processMedia(document, config, { autoJump: false, notifyTop: true });
       this.handlePauseArtifacts(document);
     }
@@ -23676,7 +23694,7 @@
       try {
         if (config.muted && !media.muted) media.muted = true;
       } catch (e) {}
-      this.applyPlaybackRate(media, config.playbackRate);
+      if (!Site.isZhihuishu) this.applyPlaybackRate(media, config.playbackRate);
 
       if (config.autoPlay && media.paused && !media.ended) {
         try {
@@ -23955,8 +23973,15 @@
 
     zhsSections() {
       try {
-        const modern = Array.from(document.querySelectorAll('li.video'));
+        // 新版智慧树目录由 .course-catalog/.chapter-item 组成，章节折叠不影响
+        // DOM 中的小节顺序，因此这里直接按目录顺序收集所有小节。
+        const catalog = document.querySelector('.course-catalog');
+        const modern = Array.from((catalog || document).querySelectorAll('.chapter-item'));
         if (modern.length) return modern;
+
+        // 兼容旧版目录。
+        const legacy = Array.from(document.querySelectorAll('li.video'));
+        if (legacy.length) return legacy;
         return Array.from(
           document.querySelectorAll('.inner-li li.clearfix.video, .resources-list .resources-item')
         );
@@ -23972,7 +23997,8 @@
           (el) =>
             el.classList.contains('current_play') ||
             el.classList.contains('activeNode') ||
-            el.classList.contains('active')
+            el.classList.contains('active') ||
+            el.classList.contains('current')
         ) || null
       );
     }
@@ -23983,14 +24009,23 @@
         el.getAttribute('data-id') ||
         el.getAttribute('data-video-id') ||
         el.getAttribute('data-file-id') ||
+        el.getAttribute('data-lesson-id') ||
         el.id ||
         el.querySelector('.catalogue_title')?.innerText?.trim() ||
+        [el.querySelector('.item-num')?.innerText, el.querySelector('.item-name')?.innerText]
+          .filter(Boolean)
+          .join(':') ||
         ''
       );
     }
 
     zhsIsSectionDone(el) {
       try {
+        const progress = el.querySelector('[role="progressbar"][aria-valuenow], [aria-valuenow]');
+        if (progress) {
+          const value = Number(progress.getAttribute('aria-valuenow'));
+          if (Number.isFinite(value)) return value >= 99.5;
+        }
         return !!el.querySelector('.time_icofinish, .finish-icon, .icon-finish');
       } catch (e) {
         return false;
@@ -24007,9 +24042,73 @@
 
     zhsCurrentVideo() {
       try {
-        return document.querySelector('#vjs_container_html5_api') || document.querySelector('video');
+        return (
+          document.querySelector('#vjs_container_html5_api, .videoArea video, video') ||
+          this.findMediaElements(document).find((media) => media.tagName?.toLowerCase() === 'video') ||
+          null
+        );
       } catch (e) {
         return null;
+      }
+    }
+
+    /**
+     * 新版智慧树不应直接改写 video.playbackRate：页面的 controlsBar 才是
+     * 播放器状态源。点击对应的 .speedTab 会同时更新 UI 和实际播放器。
+     */
+    zhsApplyControlBarRate(targetRate) {
+      const requested = Number(targetRate) || 1;
+      try {
+        const bars = skjCollectDocs(document)
+          .flatMap((doc) => Array.from(doc.querySelectorAll('.controlsBar')))
+          .filter(Boolean);
+        for (const bar of bars) {
+          const tabs = Array.from(bar.querySelectorAll('.speedBox .speedTab[rate], .speedTab[rate]'));
+          if (!tabs.length) continue;
+
+          const active = tabs.find((tab) => tab.classList.contains('active'));
+          const exact = tabs.find((tab) => Math.abs(Number(tab.getAttribute('rate')) - requested) < 0.01);
+          const chosen = exact || tabs.reduce((best, tab) => {
+            const rate = Number(tab.getAttribute('rate'));
+            if (!Number.isFinite(rate)) return best;
+            if (!best) return tab;
+            return Math.abs(rate - requested) < Math.abs(Number(best.getAttribute('rate')) - requested) ? tab : best;
+          }, null);
+          if (!chosen) continue;
+
+          const actual = Number(chosen.getAttribute('rate'));
+          if (active && Math.abs(Number(active.getAttribute('rate')) - actual) < 0.01) return true;
+          if (!skjHumanClick(chosen)) continue;
+          skjLogOnce(
+            'zhs-rate-' + actual,
+            Math.abs(actual - requested) < 0.01
+              ? `智慧树已通过控制栏设置 ${actual}x 倍速`
+              : `智慧树控制栏不支持 ${requested}x，已使用最接近的 ${actual}x 倍速`,
+            Math.abs(actual - requested) < 0.01 ? 'info' : 'warn'
+          );
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    zhsControlBarEnded() {
+      try {
+        const bar = skjCollectDocs(document)
+          .map((doc) => doc.querySelector('.controlsBar'))
+          .find(Boolean);
+        const current = bar?.querySelector('.currentTime')?.innerText || '';
+        const duration = bar?.querySelector('.duration')?.innerText || '';
+        const parse = (value) => {
+          const parts = String(value).trim().split(':').map(Number);
+          if (!parts.length || parts.some((part) => !Number.isFinite(part))) return NaN;
+          return parts.reduce((total, part) => total * 60 + part, 0);
+        };
+        const now = parse(current);
+        const total = parse(duration);
+        return total > 0 && now >= total - 0.5;
+      } catch (e) {
+        return false;
       }
     }
 
@@ -24028,7 +24127,8 @@
       }
 
       AppState.log(`切换至智慧树下一个未完成小节（第 ${list.indexOf(next) + 1} 个）`);
-      skjHumanClick(next);
+      const nextTarget = next.classList.contains('chapter-item') ? next.querySelector('.item-box') || next : next;
+      skjHumanClick(nextTarget);
       this._jumpLock = Date.now() + 6000;
 
       // 与参考扩展一致：3 秒后若仍未切换成功则重试一次
@@ -24042,22 +24142,185 @@
           const again = this.zhsFindNext(this.zhsSections(), this.zhsSections().indexOf(nowActive), !!config.skipFinished);
           if (again) {
             AppState.log('智慧树小节未切换成功，正在重试...', 'warn');
-            skjHumanClick(again);
+            const retryTarget = again.classList.contains('chapter-item') ? again.querySelector('.item-box') || again : again;
+            skjHumanClick(retryTarget);
           }
         }
       }, 3200);
     }
 
-    /** 智慧树视频弹题（#playTopic-dialog） */
-    zhsSolvePopupQuiz(config) {
-      let dialog = null;
-      try {
-        dialog = document.querySelector('#playTopic-dialog');
-      } catch (e) {}
-      if (!dialog || !skjIsDeepVisible(dialog)) return;
+    /**
+     * 智慧树弹题轮询。弹题通常在视频结束后出现，但页面可能延迟渲染、
+     * 也可能在未触发 ended 事件时出现，所以不能只依赖视频结束回调。
+     */
+    startZhsQuizPolling() {
+      if (this._zhsQuizTimer || !Site.isZhihuishu) return;
+      const poll = () => {
+        this._zhsQuizTimer = null;
+        if (!this.active) return;
+        const config = getConfig();
+        if (config.autoSolveVideoQuiz) {
+          try {
+            const task = this.zhsSolvePopupQuiz(config);
+            if (task && typeof task.catch === 'function') task.catch(() => {});
+          } catch (e) {}
+        }
+        this._zhsQuizTimer = setTimeout(poll, 600);
+      };
+      poll();
+    }
 
-      if (this.zhsAnswerPopupQuizDirect(dialog)) return;
+    zhsPopupDialog() {
+      try {
+        const dialogs = Array.from(
+          document.querySelectorAll('#playTopic-dialog, .el-dialog.ai-class-exercise-dialog')
+        );
+        return dialogs.find((dialog) => skjIsDeepVisible(dialog)) || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /** 智慧树视频弹题（旧版 Vue 弹题 + 新版 AI 随堂练习弹窗） */
+    zhsSolvePopupQuiz(config) {
+      const dialog = this.zhsPopupDialog();
+      if (!dialog) return false;
+
+      if (dialog.classList.contains('ai-class-exercise-dialog')) {
+        if (this._zhsQuizBusy) return true;
+        this._zhsQuizBusy = true;
+        return this.zhsSolveAiExercise(dialog, config).finally(() => {
+          this._zhsQuizBusy = false;
+        });
+      }
+
+      if (this.zhsAnswerPopupQuizDirect(dialog)) return true;
       this.ensureZhsQuizBridge();
+      return true;
+    }
+
+    zhsPopupQuestions(dialog) {
+      try {
+        return Array.from(dialog.querySelectorAll('.ques-list .item')).map((item, index) => {
+          const typeText = item.querySelector('.type')?.innerText || '';
+          const questionType = /多选/.test(typeText)
+            ? '多选题'
+            : /判断/.test(typeText)
+              ? '判断题'
+              : /填空/.test(typeText)
+                ? '填空题'
+                : '单选题';
+          const stem = (item.querySelector('.question-info')?.innerText || item.innerText || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const optionEls = Array.from(item.querySelectorAll('.option'));
+          const options = optionEls.map(
+            (option) => (option.querySelector('.answer')?.innerText || option.innerText || '').replace(/\s+/g, ' ').trim()
+          );
+          return { id: `zhs-q${index + 1}`, item, questionType, stem, optionEls, options };
+        }).filter((question) => question.stem && question.options.length);
+      } catch (e) {
+        return [];
+      }
+    }
+
+    zhsPopupOptionSelected(option) {
+      const nodes = [option, option?.querySelector('.class-question-select')].filter(Boolean);
+      return nodes.some((node) => {
+        const className = String(node.className || '');
+        return node.getAttribute?.('aria-checked') === 'true' ||
+          /(?:^|[ _-])(active|selected|checked|is-checked|is-active|check_answer)(?:$|[ _-])/.test(className);
+      });
+    }
+
+    zhsFillPopupQuestion(question, answer) {
+      const { item, questionType, optionEls } = question;
+      if (questionType.includes('填空')) {
+        const inputs = Array.from(item.querySelectorAll('textarea, input[type="text"]'));
+        if (!inputs.length) return false;
+        const values = Array.isArray(answer) ? answer : String(answer).split('#');
+        inputs.forEach((input, index) => {
+          input.value = String(values[index] ?? values[0] ?? '').trim();
+          skjFireInput(input);
+        });
+        return values.some((value) => String(value || '').trim());
+      }
+
+      const rawAnswer = Array.isArray(answer) ? answer.join('') : String(answer || '');
+      let indices;
+      if (questionType.includes('判断') && !/^[A-Za-z]+$/.test(rawAnswer)) {
+        const value = skjJudgmentValue(rawAnswer);
+        if (value === null) return false;
+        indices = optionEls
+          .map((option, index) => skjJudgmentValue(option.querySelector('.answer')?.innerText || option.innerText) === value ? index : -1)
+          .filter((index) => index >= 0);
+      } else {
+        const letters = rawAnswer.toUpperCase().match(/[A-Z]/g) || [];
+        indices = Array.from(new Set(letters)).map((letter) => letter.charCodeAt(0) - 65);
+      }
+      if (!indices.length || indices.some((index) => index < 0 || index >= optionEls.length)) return false;
+
+      const expected = new Set(indices);
+      const stateKnown = optionEls.some((option) => this.zhsPopupOptionSelected(option));
+      for (let index = 0; index < optionEls.length; index++) {
+        const option = optionEls[index];
+        const selected = this.zhsPopupOptionSelected(option);
+        const shouldSelect = expected.has(index);
+        if (selected === shouldSelect) continue;
+        const control = option.querySelector('.class-question-select') || option;
+        if (!skjHumanClick(control)) return false;
+      }
+
+      // 新版 Vue 会在 click 后同步切换 active/checked 类；若页面没有暴露
+      // 选中标记，则至少确保每个目标选项都成功触发了点击事件。
+      if (!stateKnown) return true;
+      return optionEls.every((option, index) => this.zhsPopupOptionSelected(option) === expected.has(index));
+    }
+
+    async zhsSolveAiExercise(dialog, config) {
+      const questions = this.zhsPopupQuestions(dialog);
+      if (!questions.length) return false;
+      const key = questions
+        .map((question) => `${question.questionType}:${question.stem}:${question.options.join('|')}`)
+        .join('||');
+      if (dialog.dataset.skjQuizKey === key) return true;
+      if (!String(config.openaiApiKey || '').trim()) {
+        skjLogOnce('zhs-ai-quiz-nokey', '检测到智慧树 AI 随堂练习，但未配置 API Key，请手动作答', 'warn');
+        return false;
+      }
+
+      const lifecycle = this._lifecycle;
+      const href = location.href;
+      const stillCurrent = () =>
+        this.active && lifecycle === this._lifecycle && location.href === href && dialog.isConnected !== false;
+      try {
+        const payload = questions.map(({ id, questionType, stem, options }) => ({
+          id,
+          type: questionType,
+          title: stem,
+          options
+        }));
+        const answers = await requestQuestionBatch(payload, config);
+        if (!stillCurrent() || !getConfig().autoSolveVideoQuiz) return false;
+
+        for (const question of questions) {
+          const answer = answers.get(question.id);
+          if (answer === undefined || !this.zhsFillPopupQuestion(question, answer)) {
+            throw new Error(`题目 ${question.id} 答案无效或选中状态校验失败`);
+          }
+        }
+
+        const submit = Array.from(dialog.querySelectorAll('button')).find((button) =>
+          /提交作答/.test(button.innerText || button.textContent || '')
+        ) || dialog.querySelector('button.el-button.btn');
+        if (!submit || !skjHumanClick(submit)) throw new Error('未找到智慧树随堂练习提交按钮');
+        dialog.dataset.skjQuizKey = key;
+        AppState.log(`智慧树 AI 随堂练习已自动作答（${questions.length} 题）`);
+        return true;
+      } catch (e) {
+        AppState.log('智慧树 AI 随堂练习作答失败: ' + (e && e.message ? e.message : e), 'error');
+        return false;
+      }
     }
 
     /** 直接读取 Vue 实例作答（脚本管理器运行在页面上下文时可用） */
@@ -25616,7 +25879,7 @@
           <div class="skj-header">
             <div class="skj-header-title">
               <span>🤖 刷课酱控制台</span>
-              <span class="skj-badge">v2.2.3</span>
+              <span class="skj-badge">v2.2.4</span>
             </div>
             <button class="skj-close" id="skj-close-btn">&times;</button>
           </div>

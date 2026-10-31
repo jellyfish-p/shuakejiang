@@ -1,16 +1,17 @@
 {
   "name": "shuakejiang",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "刷课酱 - 超星学习通、智慧树等网课助手：按任务点队列自动推进（自动跳过已完成任务点，全部完成后自动停止），支持视频自动播放、倍速播放、静音、防暂停；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等）。",
   "main": "shuakejiang.user.js",
   "scripts": {
     "build": "node scripts/build.js",
     "watch": "node scripts/build.js --watch",
-    "test": "node scripts/check.js && npm run test:races && npm run test:lifecycle && npm run test:exam && npm run test:font && npm run test:release",
+    "test": "node scripts/check.js && npm run test:races && npm run test:lifecycle && npm run test:exam && npm run test:font && npm run test:zhihuishu && npm run test:release",
     "test:races": "node scripts/race-check.js",
     "test:lifecycle": "node scripts/lifecycle-check.js",
     "test:exam": "node scripts/exam-check.js",
     "test:font": "node scripts/font-check.js && node scripts/font-api-check.js",
+    "test:zhihuishu": "node scripts/zhihuishu-check.js",
     "test:release": "node scripts/release-check.js && node scripts/release-check.test.js"
   },
   "keywords": [

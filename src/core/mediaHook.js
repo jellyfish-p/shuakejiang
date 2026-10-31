@@ -9,6 +9,11 @@
 function hookMediaWindow(win) {
   if (!win) return;
   try {
+    // 智慧树的倍速必须通过页面自己的 controlsBar 操作。若在这里重写
+    // playbackRate，control bar 的 speedTab 点击会被当成网页侧写入而丢弃。
+    const hostname = String(win.location?.hostname || '');
+    if (/zhihuishu\.com$/.test(hostname)) return;
+
     if (win._skj_media_hooked) return;
     win._skj_media_hooked = true;
 
