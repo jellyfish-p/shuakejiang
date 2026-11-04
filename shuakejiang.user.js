@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         刷课酱 - 网课视频助手 & AI 解题助手
 // @namespace    https://github.com/jellyfish-p/shuakejiang
-// @version      2.2.5
+// @version      2.2.6
 // @description  刷课酱 - 超星学习通、智慧树等网课助手：支持视频自动播放、自动连播、倍速播放、静音、防暂停；按当前页面任务点队列依次推进，视频结束后继续处理章节测验，不回头跳转旧章节，全部完成后自动停止；解题助手全面升级为 OpenAI 兼容接口，支持自定义 API Key、Base URL 与模型名称（如 DeepSeek、GPT-4o 等），实现高精度题目识别与全自动答题！
 // @author       jellyfish-p
 // @license      MIT
@@ -25337,175 +25337,333 @@
   }
 
   /* =========================================================================
-   * 控制面板样式表
+   * 控制面板样式表（WinUI / Fluent 风格，主色 #409EFF）
+   *   - 控件圆角 4px，浮层与对话框圆角 8px
+   *   - 色板沿用 WinUI 浅色主题的中性色与描边透明度
    * ========================================================================= */
   const UI_STYLES = `
-          /* 刷课酱主容器与字体 */
           #skj-widget, #skj-modal {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --skj-accent: #409EFF;
+            --skj-accent-hover: #53A8FF;
+            --skj-accent-pressed: #79BBFF;
+            --skj-accent-text: #2B7BD6;
+            --skj-accent-subtle: #ECF5FF;
+            --skj-text-1: #1B1B1B;
+            --skj-text-2: #5D5D5D;
+            --skj-text-3: #8A8A8A;
+            --skj-text-disabled: #A0A0A0;
+            --skj-layer: #F3F3F3;
+            --skj-card: #FBFBFB;
+            --skj-card-hover: #F6F6F6;
+            --skj-control: #FBFBFB;
+            --skj-control-hover: #F6F6F6;
+            --skj-control-pressed: #F2F2F2;
+            --skj-subtle-hover: rgba(0, 0, 0, 0.0373);
+            --skj-subtle-pressed: rgba(0, 0, 0, 0.0241);
+            --skj-stroke: rgba(0, 0, 0, 0.0578);
+            --skj-stroke-bottom: rgba(0, 0, 0, 0.1622);
+            --skj-stroke-input: rgba(0, 0, 0, 0.4458);
+            --skj-divider: rgba(0, 0, 0, 0.0803);
+            --skj-success: #0F7B0F;
+            --skj-caution: #9D5D00;
+            --skj-caution-bg: #FFF4CE;
+            --skj-critical: #C42B1C;
+            --skj-radius: 4px;
+            --skj-radius-lg: 8px;
+            --skj-ease: cubic-bezier(0, 0, 0, 1);
+
+            font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
+              "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
             font-size: 14px;
-            line-height: 1.5;
-            color: #1f2937;
+            line-height: 20px;
+            font-weight: 400;
+            letter-spacing: normal;
+            text-align: left;
+            color: var(--skj-text-1);
             box-sizing: border-box;
             z-index: 2147483640;
+            -webkit-font-smoothing: antialiased;
           }
-          #skj-widget *, #skj-modal * {
+          #skj-widget *, #skj-modal *,
+          #skj-widget *::before, #skj-modal *::before,
+          #skj-widget *::after, #skj-modal *::after {
             box-sizing: border-box;
           }
+          #skj-widget button, #skj-modal button,
+          #skj-modal input, #skj-modal select, #skj-modal label {
+            font: inherit;
+            color: inherit;
+            margin: 0;
+            letter-spacing: inherit;
+            text-transform: none;
+          }
+          #skj-modal [hidden] {
+            display: none !important;
+          }
+          .skj-icon {
+            width: 16px;
+            height: 16px;
+            flex: none;
+            display: block;
+          }
 
-          /* 悬浮小胶囊球 */
+          /* 焦点框：WinUI 双层焦点矩形 */
+          #skj-widget button:focus-visible,
+          #skj-modal button:focus-visible,
+          #skj-modal .skj-switch input:focus-visible + .skj-slider {
+            outline: 2px solid var(--skj-text-1);
+            outline-offset: 1px;
+            box-shadow: 0 0 0 1px #FFFFFF;
+          }
+
+          /* ---------------- 悬浮小窗 ---------------- */
           #skj-widget {
             position: fixed;
             display: flex;
             align-items: center;
-            gap: 6px;
-            padding: 8px 14px;
-            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-            color: #ffffff;
-            border-radius: 9999px;
-            box-shadow: 0 4px 14px rgba(29, 78, 216, 0.35);
+            gap: 8px;
+            height: 40px;
+            padding: 0 4px 0 6px;
+            background: rgba(252, 252, 252, 0.86);
+            -webkit-backdrop-filter: blur(30px) saturate(150%);
+            backdrop-filter: blur(30px) saturate(150%);
+            border: 1px solid rgba(0, 0, 0, 0.0578);
+            border-radius: var(--skj-radius-lg);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.14), 0 0 2px rgba(0, 0, 0, 0.12);
             cursor: move;
             user-select: none;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: box-shadow 0.2s var(--skj-ease);
           }
           #skj-widget:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(29, 78, 216, 0.45);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.16), 0 0 2px rgba(0, 0, 0, 0.14);
           }
           #skj-widget-logo {
-            font-weight: 700;
-            font-size: 15px;
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            white-space: nowrap;
+          }
+          .skj-logo-tile {
+            width: 26px;
+            height: 26px;
+            border-radius: var(--skj-radius);
+            background: var(--skj-accent);
+            color: #FFFFFF;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex: none;
+          }
+          .skj-logo-tile .skj-icon {
+            width: 14px;
+            height: 14px;
           }
           #skj-widget-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            height: 24px;
+            padding: 0 8px;
             font-size: 12px;
-            padding: 2px 8px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 12px;
-            max-width: 140px;
+            line-height: 16px;
+            color: var(--skj-text-2);
+            background: rgba(0, 0, 0, 0.0373);
+            border-radius: var(--skj-radius);
+            max-width: 168px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
           }
+          #skj-widget-status::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex: none;
+            background: var(--skj-dot, var(--skj-text-3));
+          }
           #skj-widget-btn {
-            cursor: pointer;
-            background: none;
+            width: 32px;
+            height: 32px;
+            padding: 0;
             border: none;
-            color: #ffffff;
-            font-size: 14px;
+            border-radius: var(--skj-radius);
+            background: transparent;
+            color: var(--skj-text-2);
+            cursor: pointer;
             display: flex;
             align-items: center;
-            padding: 2px;
+            justify-content: center;
+            flex: none;
+          }
+          #skj-widget-btn:hover {
+            background: var(--skj-subtle-hover);
+            color: var(--skj-text-1);
+          }
+          #skj-widget-btn:active {
+            background: var(--skj-subtle-pressed);
+            color: var(--skj-text-2);
           }
 
-          /* 模态弹窗遮罩 */
+          /* 运行状态指示色（悬浮窗与仪表盘共用） */
+          [data-skj-state="running"] { --skj-dot: var(--skj-accent); }
+          [data-skj-state="done"] { --skj-dot: var(--skj-success); }
+          [data-skj-state="error"] { --skj-dot: var(--skj-critical); }
+          [data-skj-state="running"] #skj-widget-status::before,
+          [data-skj-state="running"] .skj-status-dot {
+            animation: skjPulse 1.6s ease-in-out infinite;
+          }
+          @keyframes skjPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+          }
+
+          /* ---------------- 遮罩与对话框 ---------------- */
           #skj-modal {
             display: none;
             position: fixed;
-            top: 0;
-            left: 0;
+            inset: 0;
             width: 100vw;
             height: 100vh;
-            background: rgba(0, 0, 0, 0.45);
-            backdrop-filter: blur(2px);
+            background: rgba(0, 0, 0, 0.3);
             align-items: center;
             justify-content: center;
           }
           #skj-modal.show {
             display: flex;
           }
-
-          /* 模态弹窗主体 */
           .skj-dialog {
-            width: 580px;
-            max-width: 92vw;
-            background: #ffffff;
-            border-radius: 16px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+            width: 680px;
+            max-width: calc(100vw - 32px);
+            max-height: min(760px, calc(100vh - 48px));
+            background: var(--skj-layer);
+            border: 1px solid rgba(0, 0, 0, 0.0578);
+            border-radius: var(--skj-radius-lg);
+            box-shadow: 0 32px 64px rgba(0, 0, 0, 0.1876), 0 2px 21px rgba(0, 0, 0, 0.1474);
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            max-height: 85vh;
-            animation: skjFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+            animation: skjDialogIn 0.25s var(--skj-ease);
           }
-          @keyframes skjFadeIn {
-            from { opacity: 0; transform: scale(0.96); }
+          @keyframes skjDialogIn {
+            from { opacity: 0; transform: scale(1.04); }
             to { opacity: 1; transform: scale(1); }
           }
 
-          /* 弹窗头部 */
+          /* 标题栏 */
           .skj-header {
-            padding: 16px 20px;
-            background: #f8fafc;
-            border-bottom: 1px solid #e2e8f0;
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 16px 16px 4px 20px;
           }
           .skj-header-title {
-            font-size: 16px;
-            font-weight: 700;
-            color: #0f172a;
             display: flex;
             align-items: center;
-            gap: 8px;
-          }
-          .skj-badge {
-            font-size: 11px;
-            font-weight: 600;
-            color: #2563eb;
-            background: #eff6ff;
-            border: 1px solid #bfdbfe;
-            padding: 2px 6px;
-            border-radius: 6px;
-          }
-          .skj-close {
-            background: none;
-            border: none;
+            gap: 10px;
             font-size: 20px;
-            color: #64748b;
-            cursor: pointer;
-            border-radius: 6px;
+            line-height: 28px;
+            font-weight: 600;
+            color: var(--skj-text-1);
+          }
+          .skj-header-title .skj-logo-tile {
             width: 28px;
             height: 28px;
+          }
+          .skj-badge {
+            font-size: 12px;
+            line-height: 16px;
+            font-weight: 400;
+            color: var(--skj-text-2);
+            background: rgba(0, 0, 0, 0.0373);
+            padding: 2px 6px;
+            border-radius: var(--skj-radius);
+          }
+          .skj-close {
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            border: none;
+            border-radius: var(--skj-radius);
+            background: transparent;
+            color: var(--skj-text-2);
+            cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
           }
           .skj-close:hover {
-            background: #e2e8f0;
-            color: #0f172a;
+            background: var(--skj-subtle-hover);
+            color: var(--skj-text-1);
+          }
+          .skj-close:active {
+            background: var(--skj-subtle-pressed);
           }
 
-          /* 标签导航栏 */
+          /* 顶部导航（SelectorBar） */
           .skj-tabs {
             display: flex;
-            border-bottom: 1px solid #e2e8f0;
-            background: #ffffff;
+            gap: 4px;
+            padding: 4px 16px 0;
+            border-bottom: 1px solid var(--skj-divider);
           }
           .skj-tab {
-            flex: 1;
-            padding: 12px;
-            text-align: center;
-            font-weight: 600;
-            color: #64748b;
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            height: 40px;
+            padding: 0 12px;
+            margin-bottom: 4px;
+            border: none;
+            border-radius: var(--skj-radius);
+            background: transparent;
+            color: var(--skj-text-2);
             cursor: pointer;
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s;
+            white-space: nowrap;
+            transition: background 0.1s;
+          }
+          .skj-tab:hover {
+            background: var(--skj-subtle-hover);
+            color: var(--skj-text-1);
+          }
+          .skj-tab:active {
+            background: var(--skj-subtle-pressed);
           }
           .skj-tab.active {
-            color: #2563eb;
-            border-bottom-color: #2563eb;
-            background: #f8fafc;
+            color: var(--skj-text-1);
+            font-weight: 600;
+          }
+          .skj-tab.active .skj-icon {
+            color: var(--skj-accent);
+          }
+          .skj-tab::after {
+            content: "";
+            position: absolute;
+            left: 50%;
+            bottom: -4px;
+            width: 16px;
+            height: 3px;
+            margin-left: -8px;
+            border-radius: 2px;
+            background: var(--skj-accent);
+            transform: scaleX(0);
+            transition: transform 0.2s var(--skj-ease);
+          }
+          .skj-tab.active::after {
+            transform: scaleX(1);
           }
 
           /* 内容区 */
           .skj-body {
-            padding: 20px;
-            overflow-y: auto;
             flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 16px 20px 20px;
+            scrollbar-width: thin;
           }
           .skj-panel {
             display: none;
@@ -25513,197 +25671,515 @@
           .skj-panel.active {
             display: block;
           }
-
-          /* 弹窗底部操作栏 */
-          .skj-footer {
-            padding: 12px 20px;
-            background: #f8fafc;
-            border-top: 1px solid #e2e8f0;
+          .skj-section-title {
             display: flex;
+            align-items: center;
             justify-content: space-between;
-            align-items: center;
-            gap: 12px;
+            gap: 8px;
+            min-height: 32px;
+            margin: 20px 0 4px;
+            font-weight: 600;
+            color: var(--skj-text-1);
           }
-          .skj-footer-status {
+          .skj-section-title:first-child {
+            margin-top: 0;
+          }
+          .skj-note {
+            margin: 8px 2px 0;
             font-size: 12px;
-            color: #10b981;
+            line-height: 16px;
+            color: var(--skj-text-2);
+          }
+
+          /* 设置卡片（SettingsCard） */
+          .skj-group {
             display: flex;
-            align-items: center;
+            flex-direction: column;
             gap: 4px;
           }
-
-          /* 表单控件 */
-          .skj-form-item {
-            margin-bottom: 16px;
-          }
-          .skj-form-label {
+          .skj-card {
             display: flex;
-            justify-content: space-between;
-            font-weight: 600;
-            font-size: 13px;
-            color: #334155;
-            margin-bottom: 6px;
+            align-items: center;
+            gap: 16px;
+            min-height: 68px;
+            padding: 12px 16px;
+            background: var(--skj-card);
+            border: 1px solid var(--skj-stroke);
+            border-radius: var(--skj-radius);
+            transition: background 0.1s;
           }
-          .skj-form-desc {
+          .skj-card:hover {
+            background: var(--skj-card-hover);
+          }
+          .skj-card-stack {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 12px;
+          }
+          .skj-card-stack:hover {
+            background: var(--skj-card);
+          }
+          .skj-card-head {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+          }
+          .skj-card-icon {
+            color: var(--skj-text-1);
+            display: flex;
+            flex: none;
+          }
+          .skj-card-icon .skj-icon {
+            width: 20px;
+            height: 20px;
+          }
+          .skj-card-text {
+            flex: 1;
+            min-width: 0;
+          }
+          .skj-card-title {
+            display: block;
+            color: var(--skj-text-1);
+          }
+          .skj-card-desc {
+            margin-top: 2px;
             font-size: 12px;
-            color: #64748b;
+            line-height: 16px;
+            color: var(--skj-text-2);
+          }
+          .skj-card-desc + .skj-card-desc {
             margin-top: 4px;
           }
-          .skj-input {
-            width: 100%;
-            padding: 9px 12px;
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            font-size: 14px;
-            outline: none;
-            transition: border-color 0.2s;
+          .skj-card-action {
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
           }
-          .skj-input:focus {
-            border-color: #2563eb;
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+          .skj-card-action .skj-input {
+            width: 220px;
+          }
+          .skj-card-action .skj-input[type="number"] {
+            width: 96px;
           }
 
-          /* 开关切换 Switch */
-          .skj-switch-item {
+          /* 表单字段 */
+          .skj-fields {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px 0;
-            border-bottom: 1px solid #f1f5f9;
+            flex-direction: column;
+            gap: 12px;
+            padding-left: 36px;
           }
-          .skj-switch-text {
-            font-weight: 600;
-            color: #1e293b;
+          .skj-field-label {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--skj-text-1);
           }
+          .skj-field .skj-card-desc {
+            margin-top: 4px;
+          }
+
+          /* 文本框 / 下拉框（TextBox / ComboBox） */
+          .skj-input {
+            display: block;
+            width: 100%;
+            height: 32px;
+            padding: 5px 11px;
+            font-size: 14px;
+            line-height: 20px;
+            color: var(--skj-text-1);
+            background: var(--skj-control);
+            border: 1px solid var(--skj-stroke);
+            border-bottom-color: var(--skj-stroke-input);
+            border-radius: var(--skj-radius);
+            outline: none;
+            box-shadow: none;
+            transition: background 0.1s;
+          }
+          .skj-input::placeholder {
+            color: var(--skj-text-3);
+          }
+          .skj-input:hover {
+            background: var(--skj-control-hover);
+          }
+          .skj-input:focus {
+            background: #FFFFFF;
+            border-bottom-color: var(--skj-accent);
+            box-shadow: inset 0 -1px 0 var(--skj-accent);
+          }
+          .skj-input:disabled {
+            color: var(--skj-text-disabled);
+            background: rgba(249, 249, 249, 0.3);
+            border-color: var(--skj-stroke);
+            cursor: not-allowed;
+          }
+          select.skj-input {
+            -webkit-appearance: none;
+            appearance: none;
+            padding-right: 34px;
+            cursor: pointer;
+            border-bottom-color: var(--skj-stroke-bottom);
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%235D5D5D' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 11px center;
+          }
+          select.skj-input:focus {
+            border-bottom-color: var(--skj-stroke-bottom);
+            box-shadow: none;
+            background-color: var(--skj-control-hover);
+          }
+
+          /* 开关（ToggleSwitch） */
           .skj-switch {
             position: relative;
             display: inline-block;
-            width: 44px;
-            height: 24px;
+            width: 40px;
+            height: 20px;
+            flex: none;
           }
           .skj-switch input {
+            position: absolute;
             opacity: 0;
             width: 0;
             height: 0;
+            margin: 0;
           }
           .skj-slider {
             position: absolute;
+            inset: 0;
             cursor: pointer;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background-color: #cbd5e1;
-            transition: 0.3s;
-            border-radius: 24px;
+            background: rgba(0, 0, 0, 0.0241);
+            border: 1px solid rgba(0, 0, 0, 0.6063);
+            border-radius: 10px;
+            transition: background 0.15s, border-color 0.15s;
           }
-          .skj-slider:before {
-            position: absolute;
+          .skj-slider::before {
             content: "";
-            height: 18px;
-            width: 18px;
+            position: absolute;
+            top: 50%;
             left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: 0.3s;
-            border-radius: 50%;
+            width: 12px;
+            height: 12px;
+            margin-top: -6px;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.6063);
+            transition: transform 0.2s var(--skj-ease), width 0.15s, height 0.15s, margin 0.15s, background 0.15s;
+          }
+          .skj-switch:hover .skj-slider {
+            background: rgba(0, 0, 0, 0.0578);
+          }
+          .skj-switch:hover .skj-slider::before {
+            width: 14px;
+            height: 14px;
+            margin-top: -7px;
+          }
+          .skj-switch:active .skj-slider::before {
+            width: 17px;
           }
           .skj-switch input:checked + .skj-slider {
-            background-color: #2563eb;
+            background: var(--skj-accent);
+            border-color: var(--skj-accent);
           }
-          .skj-switch input:checked + .skj-slider:before {
+          .skj-switch input:checked + .skj-slider::before {
+            background: #FFFFFF;
             transform: translateX(20px);
           }
+          .skj-switch:hover input:checked + .skj-slider {
+            background: var(--skj-accent-hover);
+            border-color: var(--skj-accent-hover);
+          }
+          .skj-switch:hover input:checked + .skj-slider::before {
+            transform: translateX(18px);
+          }
+          .skj-switch:active input:checked + .skj-slider::before {
+            transform: translateX(15px);
+          }
 
-          /* 状态卡片与控制台日志 */
+          /* 按钮（Button / AccentButton / SubtleButton） */
+          .skj-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            height: 32px;
+            padding: 0 12px;
+            font-size: 14px;
+            line-height: 20px;
+            font-weight: 400;
+            white-space: nowrap;
+            cursor: pointer;
+            border-radius: var(--skj-radius);
+            border: 1px solid var(--skj-stroke);
+            border-bottom-color: var(--skj-stroke-bottom);
+            background: var(--skj-control);
+            color: var(--skj-text-1);
+            transition: background 0.1s, color 0.1s;
+          }
+          .skj-btn:hover {
+            background: var(--skj-control-hover);
+          }
+          .skj-btn:active {
+            background: var(--skj-control-pressed);
+            color: var(--skj-text-2);
+            border-bottom-color: var(--skj-stroke);
+          }
+          .skj-btn-primary {
+            background: var(--skj-accent);
+            color: #FFFFFF;
+            border-color: rgba(255, 255, 255, 0.08);
+            border-bottom-color: rgba(0, 0, 0, 0.4);
+          }
+          .skj-btn-primary:hover {
+            background: var(--skj-accent-hover);
+          }
+          .skj-btn-primary:active {
+            background: var(--skj-accent-pressed);
+            color: rgba(255, 255, 255, 0.8);
+            border-color: transparent;
+          }
+          .skj-btn-subtle {
+            background: transparent;
+            border-color: transparent;
+            color: var(--skj-text-1);
+          }
+          .skj-btn-subtle:hover {
+            background: var(--skj-subtle-hover);
+          }
+          .skj-btn-subtle:active {
+            background: var(--skj-subtle-pressed);
+            border-color: transparent;
+          }
+          .skj-btn-sm {
+            height: 28px;
+            padding: 0 8px;
+            font-size: 13px;
+          }
+
+          /* 仪表盘 */
           .skj-status-card {
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 12px;
-            padding: 14px;
-            margin-bottom: 16px;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            gap: 16px;
+            padding: 16px;
+            background: var(--skj-card);
+            border: 1px solid var(--skj-stroke);
+            border-radius: var(--skj-radius-lg);
           }
-          .skj-status-dot {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            background: #10b981;
-            border-radius: 50%;
-            margin-right: 6px;
-          }
-          .skj-actions {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 16px;
-          }
-          .skj-btn {
-            flex: 1;
-            padding: 10px 14px;
-            border: none;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 13px;
-            cursor: pointer;
+          .skj-status-icon {
+            position: relative;
+            width: 44px;
+            height: 44px;
+            flex: none;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 6px;
-            transition: all 0.2s;
+            border-radius: var(--skj-radius-lg);
+            background: var(--skj-accent-subtle);
+            color: var(--skj-accent);
           }
-          .skj-btn-primary {
-            background: #2563eb;
-            color: #ffffff;
+          .skj-status-icon .skj-icon {
+            width: 22px;
+            height: 22px;
           }
-          .skj-btn-primary:hover {
-            background: #1d4ed8;
+          .skj-status-dot {
+            position: absolute;
+            right: -2px;
+            bottom: -2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid var(--skj-card);
+            background: var(--skj-dot, var(--skj-text-3));
           }
-          .skj-btn-secondary {
-            background: #e2e8f0;
-            color: #334155;
-          }
-          .skj-btn-secondary:hover {
-            background: #cbd5e1;
-          }
-          .skj-btn-danger {
-            background: #ef4444;
-            color: #ffffff;
-          }
-
-          /* 日志窗口 */
-          .skj-console {
-            height: 170px;
-            background: #0f172a;
-            color: #e2e8f0;
-            border-radius: 10px;
-            padding: 10px;
-            font-family: Consolas, Monaco, monospace;
+          .skj-status-label {
             font-size: 12px;
-            overflow-y: auto;
-            line-height: 1.6;
+            line-height: 16px;
+            color: var(--skj-text-2);
           }
-          .skj-log-item {
+          .skj-status-text {
+            margin-top: 2px;
+            font-size: 16px;
+            line-height: 22px;
+            font-weight: 600;
+            color: var(--skj-text-1);
             word-break: break-all;
           }
-          .skj-log-item.error { color: #f87171; }
-          .skj-log-item.warn { color: #facc15; }
-
-          /* 警告小注 */
-          .skj-alert {
-            background: #fffbeb;
-            border: 1px solid #fef3c7;
-            border-radius: 8px;
-            padding: 10px 12px;
-            font-size: 12px;
-            color: #b45309;
-            margin-top: 10px;
+          .skj-actions {
             display: flex;
+            gap: 8px;
+            margin-top: 12px;
+          }
+          .skj-actions .skj-btn {
+            flex: 1;
+            height: 36px;
+          }
+
+          /* 运行日志 */
+          .skj-console {
+            height: 220px;
+            overflow-y: auto;
+            padding: 8px 0;
+            background: #FFFFFF;
+            border: 1px solid var(--skj-stroke);
+            border-radius: var(--skj-radius);
+            font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, "Microsoft YaHei UI", monospace;
+            font-size: 12px;
+            line-height: 18px;
+            scrollbar-width: thin;
+          }
+          .skj-console:empty::before {
+            content: "暂无日志";
+            display: block;
+            padding: 4px 12px;
+            color: var(--skj-text-3);
+            font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+          }
+          .skj-log-item {
+            display: flex;
+            gap: 10px;
+            padding: 1px 12px;
+            color: var(--skj-text-1);
+            word-break: break-all;
+          }
+          .skj-log-item:hover {
+            background: rgba(0, 0, 0, 0.024);
+          }
+          .skj-log-time {
+            flex: none;
+            color: var(--skj-text-3);
+          }
+          .skj-log-item.warn { color: var(--skj-caution); }
+          .skj-log-item.error {
+            color: var(--skj-critical);
+            background: rgba(196, 43, 28, 0.05);
+          }
+
+          /* 提示条（InfoBar） */
+          .skj-alert {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            margin-top: 4px;
+            padding: 12px 16px;
+            font-size: 13px;
+            line-height: 20px;
+            color: var(--skj-text-1);
+            background: var(--skj-caution-bg);
+            border: 1px solid var(--skj-stroke);
+            border-radius: var(--skj-radius);
+          }
+          .skj-alert-icon {
+            width: 16px;
+            height: 16px;
+            margin-top: 2px;
+            flex: none;
+            border-radius: 50%;
+            background: var(--skj-caution);
+            color: #FFFFFF;
+            font-size: 11px;
+            line-height: 16px;
+            font-weight: 700;
+            text-align: center;
+          }
+
+          /* 底部命令栏 */
+          .skj-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 64px;
+            padding: 12px 20px;
+            background: #FAFAFA;
+            border-top: 1px solid var(--skj-divider);
+          }
+          .skj-footer-status {
+            display: flex;
+            align-items: center;
             gap: 6px;
+            min-width: 0;
+            font-size: 12px;
+            line-height: 16px;
+            color: var(--skj-text-2);
+          }
+          .skj-footer-status span {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+          }
+          .skj-tip-success {
+            color: var(--skj-success);
+            font-weight: 600;
+          }
+          .skj-footer-actions {
+            display: flex;
+            gap: 8px;
+            flex: none;
+          }
+
+          @media (max-width: 560px) {
+            .skj-tab span { display: none; }
+            .skj-card, .skj-card-head { flex-wrap: wrap; }
+            .skj-card-action .skj-input { width: 100%; }
+            .skj-card-action { width: 100%; }
+            .skj-fields { padding-left: 0; }
+            .skj-footer { flex-wrap: wrap; }
+          }
+          @media (prefers-reduced-motion: reduce) {
+            #skj-widget, #skj-modal, #skj-widget *, #skj-modal * {
+              animation: none !important;
+              transition: none !important;
+            }
           }
   `;
 
   /* =========================================================================
    * 7. 现代化悬浮设置面板与 UI 渲染 (仅在顶层窗口创建)
+   *    视觉风格：WinUI / Fluent 小圆角，主色 #409EFF
    * ========================================================================= */
+  const SKJ_ICON_PATHS = {
+    logo: '<path d="M5.5 3.5v9l7-4.5z" fill="currentColor" stroke="none"/>',
+    settings: '<path d="M2 4.5h6.5M12.5 4.5H14M2 11.5h1.5M7.5 11.5H14"/><circle cx="10.5" cy="4.5" r="2"/><circle cx="5.5" cy="11.5" r="2"/>',
+    dashboard: '<rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/>',
+    video: '<rect x="1.5" y="3.5" width="9" height="9" rx="1.5"/><path d="M10.5 7l4-2.5v7l-4-2.5"/>',
+    ai: '<path d="M8 1.5l1.4 5.1 5.1 1.4-5.1 1.4L8 14.5 6.6 9.4 1.5 8l5.1-1.4z"/>',
+    close: '<path d="M4 4l8 8M12 4l-8 8"/>',
+    pulse: '<path d="M1.5 8.5h3l2-5 3 9 2-4h3"/>',
+    edit: '<path d="M10.5 2.5l3 3-8 8h-3v-3z"/><path d="M9 4l3 3"/>',
+    next: '<path d="M3 3.5v9l6.5-4.5z"/><path d="M12.5 3.5v9"/>',
+    trash: '<path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4"/>',
+    speed: '<path d="M2 11.5a6 6 0 1 1 12 0"/><path d="M8 11.5l2.5-4"/>',
+    mute: '<path d="M2 6h2.5L8 3v10l-3.5-3H2z"/><path d="M11 6l3 4M14 6l-3 4"/>',
+    check: '<circle cx="8" cy="8" r="6"/><path d="M5.5 8.2L7.2 10l3.3-3.8"/>',
+    repeat: '<path d="M2.5 8a5.5 5.5 0 0 1 9.6-3.6M13.5 2.5V5H11M13.5 8a5.5 5.5 0 0 1-9.6 3.6M2.5 13.5V11H5"/>',
+    quiz: '<path d="M2.5 3h11v8H7l-3 2.5V11H2.5z"/><path d="M6.5 5.8a1.5 1.5 0 1 1 2 1.4c-.4.2-.5.5-.5.9M8 9.3v.1"/>',
+    send: '<path d="M2 8l12-5.5L10.5 14 8 9z"/><path d="M8 9l6-6.5"/>',
+    layers: '<path d="M8 2l6 3-6 3-6-3z"/><path d="M2 8l6 3 6-3M2 11l6 3 6-3"/>',
+    parallel: '<path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>',
+    key: '<circle cx="5" cy="11" r="2.5"/><path d="M6.8 9.2L13 3M11 5l1.5 1.5M9.5 6.5L11 8"/>',
+    font: '<path d="M3 13L7 3h2l4 10M4.8 9h6.4"/>',
+    flash: '<path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z"/>',
+    save: '<path d="M2.5 2.5h9l2 2v9h-11z"/><path d="M5 2.5V6h5V2.5M5 13.5v-4h6v4"/>',
+    done: '<path d="M3.5 8.5l3 3 6-7"/>',
+    info: '<circle cx="8" cy="8" r="6"/><path d="M8 7.2v3.8M8 5v.1"/>'
+  };
+
+  function skjIcon(name) {
+    return '<svg class="skj-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (SKJ_ICON_PATHS[name] || '') + '</svg>';
+  }
+
+  /** 根据状态文案推断指示灯颜色：idle / running / done / error */
+  function skjStatusTone(text) {
+    const s = String(text || '');
+    if (/失败|错误|异常/.test(s)) return 'error';
+    if (/完成/.test(s)) return 'done';
+    if (!s || /^(就绪|空闲)$|已停止/.test(s)) return 'idle';
+    return 'running';
+  }
+
+  const SKJ_SAVE_TIP_IDLE = `<span>${skjIcon('info')}大部分设置修改后实时自动生效并保存</span>`;
+
   class UIController {
     constructor(videoAssist, examAssist) {
       this.videoAssist = videoAssist;
@@ -25749,11 +26225,12 @@
       widget.id = 'skj-widget';
       widget.style.top = pos.top + 'px';
       widget.style.right = pos.right + 'px';
+      widget.setAttribute('data-skj-state', 'idle');
 
       widget.innerHTML = `
-        <div id="skj-widget-logo">🤖 刷课酱</div>
+        <div id="skj-widget-logo"><span class="skj-logo-tile">${skjIcon('logo')}</span>刷课酱</div>
         <div id="skj-widget-status">就绪</div>
-        <button id="skj-widget-btn" title="点击打开设置面板">⚙️</button>
+        <button type="button" id="skj-widget-btn" title="打开设置面板" aria-label="打开设置面板">${skjIcon('settings')}</button>
       `;
 
       document.body.appendChild(widget);
@@ -25763,7 +26240,8 @@
       let startX, startY, initialTop, initialRight;
 
       widget.addEventListener('mousedown', (e) => {
-        if (e.target.id === 'skj-widget-btn') return;
+        // 按钮内部是 SVG，需用 closest 判断，避免点击设置按钮时触发拖拽
+        if (e.target.closest && e.target.closest('#skj-widget-btn')) return;
         isDragging = true;
         startX = e.clientX;
         startY = e.clientY;
@@ -25803,227 +26281,214 @@
       const visionEnabled = cfg.cxFontStrategy === 'vision';
       const independentVision = visionEnabled && cfg.cxVisionUseMain === false;
 
+      // 设置卡片：图标 + 标题/说明 + 右侧开关，点击文字同样可以切换
+      const toggleCard = (key, icon, title, desc) => `
+                <div class="skj-card">
+                  <span class="skj-card-icon">${skjIcon(icon)}</span>
+                  <label class="skj-card-text" for="skj-cfg-${key}">
+                    <span class="skj-card-title">${title}</span>
+                    <span class="skj-card-desc">${desc}</span>
+                  </label>
+                  <label class="skj-switch">
+                    <input type="checkbox" id="skj-cfg-${key}" ${cfg[key] ? 'checked' : ''}>
+                    <span class="skj-slider"></span>
+                  </label>
+                </div>`;
+
       modal.innerHTML = `
-        <div class="skj-dialog">
+        <div class="skj-dialog" role="dialog" aria-modal="true" aria-labelledby="skj-dialog-title">
           <div class="skj-header">
-            <div class="skj-header-title">
-              <span>🤖 刷课酱控制台</span>
-              <span class="skj-badge">v2.2.5</span>
+            <div class="skj-header-title" id="skj-dialog-title">
+              <span class="skj-logo-tile">${skjIcon('logo')}</span>
+              <span>刷课酱控制台</span>
+              <span class="skj-badge">v2.2.6</span>
             </div>
-            <button class="skj-close" id="skj-close-btn">&times;</button>
+            <button type="button" class="skj-close" id="skj-close-btn" title="关闭" aria-label="关闭">${skjIcon('close')}</button>
           </div>
 
-          <div class="skj-tabs">
-            <div class="skj-tab active" data-tab="dashboard">📊 控制仪表盘</div>
-            <div class="skj-tab" data-tab="video">🎬 视频设置</div>
-            <div class="skj-tab" data-tab="ai">🧠 AI 接口配置</div>
+          <div class="skj-tabs" role="tablist">
+            <button type="button" class="skj-tab active" role="tab" aria-selected="true" data-tab="dashboard">${skjIcon('dashboard')}<span>控制仪表盘</span></button>
+            <button type="button" class="skj-tab" role="tab" aria-selected="false" data-tab="video">${skjIcon('video')}<span>视频设置</span></button>
+            <button type="button" class="skj-tab" role="tab" aria-selected="false" data-tab="ai">${skjIcon('ai')}<span>AI 接口配置</span></button>
           </div>
 
           <div class="skj-body">
             <!-- 标签页 1: 仪表盘 -->
-            <div class="skj-panel active" id="skj-panel-dashboard">
-              <div class="skj-status-card">
-                <div>
-                  <div style="font-weight: 700; color: #1e293b; margin-bottom: 2px;">
-                    <span class="skj-status-dot"></span>当前状态
-                  </div>
-                  <div id="skj-modal-status-text" style="color: #64748b; font-size: 13px;">就绪</div>
-                </div>
-                <div>
-                  <button class="skj-btn skj-btn-secondary" id="skj-quick-clear-btn" style="padding: 6px 10px;">清空日志</button>
+            <div class="skj-panel active" id="skj-panel-dashboard" role="tabpanel">
+              <div class="skj-status-card" id="skj-status-card" data-skj-state="idle">
+                <div class="skj-status-icon">${skjIcon('pulse')}<span class="skj-status-dot"></span></div>
+                <div class="skj-card-text">
+                  <div class="skj-status-label">当前状态</div>
+                  <div class="skj-status-text" id="skj-modal-status-text">就绪</div>
                 </div>
               </div>
 
               <div class="skj-actions">
-                <button class="skj-btn skj-btn-primary" id="skj-manual-solve-btn">📝 立即解答当前题目</button>
-                <button class="skj-btn skj-btn-secondary" id="skj-next-btn">⏭️ 强制跳转下一节</button>
+                <button type="button" class="skj-btn skj-btn-primary" id="skj-manual-solve-btn">${skjIcon('edit')}立即解答当前题目</button>
+                <button type="button" class="skj-btn" id="skj-next-btn">${skjIcon('next')}强制跳转下一节</button>
               </div>
 
-              <div class="skj-form-label">运行日志</div>
+              <div class="skj-section-title">
+                <span>运行日志</span>
+                <button type="button" class="skj-btn skj-btn-subtle skj-btn-sm" id="skj-quick-clear-btn">${skjIcon('trash')}清空日志</button>
+              </div>
               <div class="skj-console" id="skj-console-box"></div>
             </div>
 
             <!-- 标签页 2: 视频设置 -->
-            <div class="skj-panel" id="skj-panel-video">
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">开启视频助手</div>
-                  <div class="skj-form-desc">开启后自动接管网页视频并执行设定的播放逻辑</div>
-                </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-videoEnabled" ${cfg.videoEnabled ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
+            <div class="skj-panel" id="skj-panel-video" role="tabpanel">
+              <div class="skj-section-title">播放流程</div>
+              <div class="skj-group">
+                ${toggleCard('videoEnabled', 'video', '开启视频助手', '开启后自动接管网页视频并执行设定的播放逻辑')}
+                ${toggleCard('autoNext', 'repeat', '自动连续播放 (自动下一节)', '视频播放完毕后自动寻找并点击下一节课程')}
+                ${toggleCard('skipFinished', 'check', '自动跳过已完成任务点', '播放视频前检查是否已有完成绿标，已完成则自动秒跳下一节')}
+                ${toggleCard('autoSolveVideoQuiz', 'quiz', '自动跳过/求解视频随堂测验 (弹题)', '视频中间停顿弹题时自动答题或解除暂停')}
               </div>
 
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">自动连续播放 (自动下一节)</div>
-                  <div class="skj-form-desc">视频播放完毕后自动寻找并点击下一节课程</div>
+              <div class="skj-section-title">播放参数</div>
+              <div class="skj-group">
+                ${toggleCard('muted', 'mute', '自动静音播放', '规避浏览器自动播放限制，防止爆音干扰')}
+                <div class="skj-card">
+                  <span class="skj-card-icon">${skjIcon('speed')}</span>
+                  <label class="skj-card-text" for="skj-cfg-playbackRate">
+                    <span class="skj-card-title">视频播放倍速</span>
+                    <span class="skj-card-desc">注：内置底层反检测 HOOK，可防止倍速被网页强制重置</span>
+                  </label>
+                  <div class="skj-card-action">
+                    <select class="skj-input" id="skj-cfg-playbackRate">
+                      <option value="1.0" ${cfg.playbackRate == 1.0 ? 'selected' : ''}>1.0x (原速 / 推荐)</option>
+                      <option value="1.25" ${cfg.playbackRate == 1.25 ? 'selected' : ''}>1.25x (平稳快速)</option>
+                      <option value="1.5" ${cfg.playbackRate == 1.5 ? 'selected' : ''}>1.5x (快速)</option>
+                      <option value="2.0" ${cfg.playbackRate == 2.0 ? 'selected' : ''}>2.0x (极速)</option>
+                      <option value="2.5" ${cfg.playbackRate == 2.5 ? 'selected' : ''}>2.5x (超速)</option>
+                    </select>
+                  </div>
                 </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-autoNext" ${cfg.autoNext ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
-              </div>
-
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">自动跳过已完成任务点</div>
-                  <div class="skj-form-desc">播放视频前检查是否已有完成绿标，已完成则自动秒跳下一节</div>
-                </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-skipFinished" ${cfg.skipFinished ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
-              </div>
-
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">自动静音播放</div>
-                  <div class="skj-form-desc">规避浏览器自动播放限制，防止爆音干扰</div>
-                </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-muted" ${cfg.muted ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
-              </div>
-
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">自动跳过/求解视频随堂测验 (弹题)</div>
-                  <div class="skj-form-desc">视频中间停顿弹题时自动答题或解除暂停</div>
-                </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-autoSolveVideoQuiz" ${cfg.autoSolveVideoQuiz ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
-              </div>
-
-              <div class="skj-form-item" style="margin-top: 16px;">
-                <div class="skj-form-label">视频播放倍速</div>
-                <select class="skj-input" id="skj-cfg-playbackRate">
-                  <option value="1.0" ${cfg.playbackRate == 1.0 ? 'selected' : ''}>1.0x (原速 / 推荐)</option>
-                  <option value="1.25" ${cfg.playbackRate == 1.25 ? 'selected' : ''}>1.25x (平稳快速)</option>
-                  <option value="1.5" ${cfg.playbackRate == 1.5 ? 'selected' : ''}>1.5x (快速)</option>
-                  <option value="2.0" ${cfg.playbackRate == 2.0 ? 'selected' : ''}>2.0x (极速)</option>
-                  <option value="2.5" ${cfg.playbackRate == 2.5 ? 'selected' : ''}>2.5x (超速)</option>
-                </select>
-                <div class="skj-form-desc">注：内置底层反检测 HOOK，可防止倍速被网页强制重置</div>
               </div>
             </div>
 
             <!-- 标签页 3: AI 接口配置 -->
-            <div class="skj-panel" id="skj-panel-ai">
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">开启 AI 解题助手</div>
-                  <div class="skj-form-desc">遇到章节测验或作业/考试时自动识别题干并请求 AI 答案</div>
+            <div class="skj-panel" id="skj-panel-ai" role="tabpanel">
+              <div class="skj-section-title">解题助手</div>
+              <div class="skj-group">
+                ${toggleCard('examEnabled', 'ai', '开启 AI 解题助手', '遇到章节测验或作业/考试时自动识别题干并请求 AI 答案')}
+                ${toggleCard('autoSubmit', 'send', '做完后自动提交', '开启后自动填入、暂存并自动点击提交按钮完成测验')}
+                <div class="skj-alert" role="note">
+                  <span class="skj-alert-icon">!</span>
+                  <span>已默认开启【自动提交】，答题完毕后将自动确认提交。如需人工检查核对，可在此处关闭此开关。</span>
                 </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-examEnabled" ${cfg.examEnabled ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
               </div>
 
-              <div class="skj-switch-item">
-                <div>
-                  <div class="skj-switch-text">做完后自动提交</div>
-                  <div class="skj-form-desc">开启后自动填入、暂存并自动点击提交按钮完成测验</div>
-                </div>
-                <label class="skj-switch">
-                  <input type="checkbox" id="skj-cfg-autoSubmit" ${cfg.autoSubmit ? 'checked' : ''}>
-                  <span class="skj-slider"></span>
-                </label>
-              </div>
-
-              <div class="skj-alert">
-                <span>💡</span>
-                <span>已默认开启【自动提交】，答题完毕后将自动确认提交。如需人工检查核对，可在此处关闭此开关。</span>
-              </div>
-
-              <div class="skj-form-item">
-                <label class="skj-form-label" for="skj-cfg-cxBatchSize">单次请求题目数（自动保存）</label>
-                <input type="number" class="skj-input" id="skj-cfg-cxBatchSize" min="1" max="${CX_MAX_BATCH_SIZE}" step="1" value="${cxRequestSettings.batchSize}">
-                <div class="skj-form-desc">默认 4 题，仅对超星章节测验与作业/考试批量解题生效。</div>
-              </div>
-
-              <div class="skj-form-item">
-                <label class="skj-form-label" for="skj-cfg-cxConcurrency">API 并发请求数（自动保存）</label>
-                <input type="number" class="skj-input" id="skj-cfg-cxConcurrency" min="1" max="${CX_MAX_CONCURRENCY}" step="1" value="${cxRequestSettings.concurrency}">
-                <div class="skj-form-desc">默认 3 并发，设为 1 即串行；仅对超星章节测验与作业/考试批量解题生效。</div>
-              </div>
-              <div class="skj-form-desc">以上配置下次答题生效，不影响正在进行的请求；参数过高可能触发 API 限流。</div>
-              <div class="skj-form-desc" id="skj-save-tip" aria-live="polite"></div>
-
-              <div style="margin-top: 18px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: #334155; display: flex; align-items: center; gap: 6px;">
-                <span>🔑</span>
-                <span>大模型 API 接口参数设置 (需手动保存)</span>
-              </div>
-
-              <div class="skj-form-item">
-                <div class="skj-form-label">API 接口地址 (Base URL)</div>
-                <input type="text" class="skj-input" id="skj-cfg-openaiBaseUrl" placeholder="https://api.openai.com/v1" value="${escapeAttribute(cfg.openaiBaseUrl)}">
-                <div class="skj-form-desc">支持任意 OpenAI 兼容地址，例如 DeepSeek、OneAPI、SiliconFlow 或本地 Ollama</div>
-              </div>
-
-              <div class="skj-form-item">
-                <div class="skj-form-label">API Key (密钥)</div>
-                <input type="password" class="skj-input" id="skj-cfg-openaiApiKey" placeholder="sk-..." value="${escapeAttribute(cfg.openaiApiKey)}">
-                <div class="skj-form-desc">密钥保存在本地配置中；调用时仅发送给您配置的对应 API 地址，请勿使用不可信接口</div>
-              </div>
-
-              <div class="skj-form-item">
-                <div class="skj-form-label">模型名称 (Model)</div>
-                <input type="text" class="skj-input" id="skj-cfg-openaiModel" placeholder="gpt-4o-mini" value="${escapeAttribute(cfg.openaiModel)}">
-                <div class="skj-form-desc">例如：gpt-4o-mini、deepseek-chat、qwen-turbo、claude-3-haiku 等</div>
-              </div>
-
-              <div class="skj-form-item">
-                <div class="skj-form-label">超星字体混淆处理策略（自动保存）</div>
-                <select class="skj-input" id="skj-cfg-cxFontStrategy">
-                  <option value="table" ${!visionEnabled ? 'selected' : ''}>查现有指纹表（默认）</option>
-                  <option value="vision" ${visionEnabled ? 'selected' : ''}>图片视觉识别</option>
-                </select>
-                <div class="skj-form-desc">手动选择一种策略，不自动回退。非混淆题继续走原有解题流程。</div>
-                <div class="skj-form-desc">仅图片视觉会向所配置的 API 上传混淆区域用到的编号汉字图片；识字后仍由主模型按原有批请求解题。识别失败不会自动提交；视觉转写仍可能误认汉字，建议关闭自动提交后核对。</div>
-              </div>
-
-              <div id="skj-cx-vision-settings" ${visionEnabled ? '' : 'hidden'}>
-                <div class="skj-form-item">
-                  <div class="skj-form-label">视觉 API 来源（自动保存）</div>
-                  <select class="skj-input" id="skj-cfg-cxVisionUseMain">
-                    <option value="true" ${cfg.cxVisionUseMain !== false ? 'selected' : ''}>复用主解题模型</option>
-                    <option value="false" ${cfg.cxVisionUseMain === false ? 'selected' : ''}>独立视觉 API</option>
-                  </select>
-                  <div class="skj-form-desc">复用时主解题模型必须支持图片；独立模式的视觉模型也必须支持图片。两套 API 不会自动回退或混用。</div>
-                </div>
-
-                <div id="skj-cx-vision-independent" ${independentVision ? '' : 'hidden'}>
-                  <div class="skj-form-item">
-                    <div class="skj-form-label">独立视觉 Base URL（需手动保存）</div>
-                    <input type="text" class="skj-input" id="skj-cfg-cxVisionBaseUrl" placeholder="https://api.openai.com/v1" value="${escapeAttribute(cfg.cxVisionBaseUrl)}" ${independentVision ? '' : 'disabled'}>
+              <div class="skj-section-title">批量请求</div>
+              <div class="skj-group">
+                <div class="skj-card">
+                  <span class="skj-card-icon">${skjIcon('layers')}</span>
+                  <div class="skj-card-text">
+                    <label class="skj-card-title" for="skj-cfg-cxBatchSize">单次请求题目数（自动保存）</label>
+                    <span class="skj-card-desc">默认 4 题，仅对超星章节测验与作业/考试批量解题生效。</span>
                   </div>
-                  <div class="skj-form-item">
-                    <div class="skj-form-label">独立视觉 API Key（需手动保存）</div>
-                    <input type="password" class="skj-input" id="skj-cfg-cxVisionApiKey" placeholder="sk-..." value="${escapeAttribute(cfg.cxVisionApiKey)}" ${independentVision ? '' : 'disabled'}>
+                  <div class="skj-card-action">
+                    <input type="number" class="skj-input" id="skj-cfg-cxBatchSize" min="1" max="${CX_MAX_BATCH_SIZE}" step="1" value="${cxRequestSettings.batchSize}">
                   </div>
-                  <div class="skj-form-item">
-                    <div class="skj-form-label">独立视觉 Model（需手动保存）</div>
-                    <input type="text" class="skj-input" id="skj-cfg-cxVisionModel" placeholder="支持图片的模型名称" value="${escapeAttribute(cfg.cxVisionModel)}" ${independentVision ? '' : 'disabled'}>
-                    <div class="skj-form-desc">三个独立参数必须全部填写，再点击下方保存。切换或隐藏此区域不会清空已保存的独立配置。</div>
+                </div>
+                <div class="skj-card">
+                  <span class="skj-card-icon">${skjIcon('parallel')}</span>
+                  <div class="skj-card-text">
+                    <label class="skj-card-title" for="skj-cfg-cxConcurrency">API 并发请求数（自动保存）</label>
+                    <span class="skj-card-desc">默认 3 并发，设为 1 即串行；仅对超星章节测验与作业/考试批量解题生效。</span>
+                  </div>
+                  <div class="skj-card-action">
+                    <input type="number" class="skj-input" id="skj-cfg-cxConcurrency" min="1" max="${CX_MAX_CONCURRENCY}" step="1" value="${cxRequestSettings.concurrency}">
+                  </div>
+                </div>
+              </div>
+              <div class="skj-note">以上配置下次答题生效，不影响正在进行的请求；参数过高可能触发 API 限流。</div>
+
+              <div class="skj-section-title">大模型 API 接口参数设置 (需手动保存)</div>
+              <div class="skj-card skj-card-stack">
+                <div class="skj-card-head">
+                  <span class="skj-card-icon">${skjIcon('key')}</span>
+                  <div class="skj-card-text">
+                    <span class="skj-card-title">OpenAI 兼容接口</span>
+                    <span class="skj-card-desc">修改以下参数后，点击底部的“保存 API 配置”生效</span>
+                  </div>
+                </div>
+                <div class="skj-fields">
+                  <div class="skj-field">
+                    <label class="skj-field-label" for="skj-cfg-openaiBaseUrl">API 接口地址 (Base URL)</label>
+                    <input type="text" class="skj-input" id="skj-cfg-openaiBaseUrl" placeholder="https://api.openai.com/v1" value="${escapeAttribute(cfg.openaiBaseUrl)}">
+                    <div class="skj-card-desc">支持任意 OpenAI 兼容地址，例如 DeepSeek、OneAPI、SiliconFlow 或本地 Ollama</div>
+                  </div>
+                  <div class="skj-field">
+                    <label class="skj-field-label" for="skj-cfg-openaiApiKey">API Key (密钥)</label>
+                    <input type="password" class="skj-input" id="skj-cfg-openaiApiKey" placeholder="sk-..." value="${escapeAttribute(cfg.openaiApiKey)}" autocomplete="off">
+                    <div class="skj-card-desc">密钥保存在本地配置中；调用时仅发送给您配置的对应 API 地址，请勿使用不可信接口</div>
+                  </div>
+                  <div class="skj-field">
+                    <label class="skj-field-label" for="skj-cfg-openaiModel">模型名称 (Model)</label>
+                    <input type="text" class="skj-input" id="skj-cfg-openaiModel" placeholder="gpt-4o-mini" value="${escapeAttribute(cfg.openaiModel)}">
+                    <div class="skj-card-desc">例如：gpt-4o-mini、deepseek-chat、qwen-turbo、claude-3-haiku 等</div>
                   </div>
                 </div>
               </div>
 
-              <div class="skj-form-desc">连接测试仅检查主解题 API 的文本响应，不验证模型的图片识别能力。</div>
-              <div style="display: flex; gap: 10px; margin-top: 16px;">
-                <button class="skj-btn skj-btn-secondary" id="skj-test-ai-btn">⚡ 测试 API 连接</button>
-                <button class="skj-btn skj-btn-primary" id="skj-save-api-btn">💾 保存 API 配置</button>
+              <div class="skj-section-title">超星字体混淆</div>
+              <div class="skj-card skj-card-stack">
+                <div class="skj-card-head">
+                  <span class="skj-card-icon">${skjIcon('font')}</span>
+                  <div class="skj-card-text">
+                    <label class="skj-card-title" for="skj-cfg-cxFontStrategy">超星字体混淆处理策略（自动保存）</label>
+                    <span class="skj-card-desc">手动选择一种策略，不自动回退。非混淆题继续走原有解题流程。</span>
+                  </div>
+                  <div class="skj-card-action">
+                    <select class="skj-input" id="skj-cfg-cxFontStrategy">
+                      <option value="table" ${!visionEnabled ? 'selected' : ''}>查现有指纹表（默认）</option>
+                      <option value="vision" ${visionEnabled ? 'selected' : ''}>图片视觉识别</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="skj-fields">
+                  <div class="skj-card-desc">仅图片视觉会向所配置的 API 上传混淆区域用到的编号汉字图片；识字后仍由主模型按原有批请求解题。识别失败不会自动提交；视觉转写仍可能误认汉字，建议关闭自动提交后核对。</div>
+                </div>
+
+                <div id="skj-cx-vision-settings" ${visionEnabled ? '' : 'hidden'} class="skj-fields">
+                  <div class="skj-field">
+                    <label class="skj-field-label" for="skj-cfg-cxVisionUseMain">视觉 API 来源（自动保存）</label>
+                    <select class="skj-input" id="skj-cfg-cxVisionUseMain">
+                      <option value="true" ${cfg.cxVisionUseMain !== false ? 'selected' : ''}>复用主解题模型</option>
+                      <option value="false" ${cfg.cxVisionUseMain === false ? 'selected' : ''}>独立视觉 API</option>
+                    </select>
+                    <div class="skj-card-desc">复用时主解题模型必须支持图片；独立模式的视觉模型也必须支持图片。两套 API 不会自动回退或混用。</div>
+                  </div>
+
+                  <div id="skj-cx-vision-independent" ${independentVision ? '' : 'hidden'} class="skj-fields">
+                    <div class="skj-field">
+                      <label class="skj-field-label" for="skj-cfg-cxVisionBaseUrl">独立视觉 Base URL（需手动保存）</label>
+                      <input type="text" class="skj-input" id="skj-cfg-cxVisionBaseUrl" placeholder="https://api.openai.com/v1" value="${escapeAttribute(cfg.cxVisionBaseUrl)}" ${independentVision ? '' : 'disabled'}>
+                    </div>
+                    <div class="skj-field">
+                      <label class="skj-field-label" for="skj-cfg-cxVisionApiKey">独立视觉 API Key（需手动保存）</label>
+                      <input type="password" class="skj-input" id="skj-cfg-cxVisionApiKey" placeholder="sk-..." value="${escapeAttribute(cfg.cxVisionApiKey)}" ${independentVision ? '' : 'disabled'} autocomplete="off">
+                    </div>
+                    <div class="skj-field">
+                      <label class="skj-field-label" for="skj-cfg-cxVisionModel">独立视觉 Model（需手动保存）</label>
+                      <input type="text" class="skj-input" id="skj-cfg-cxVisionModel" placeholder="支持图片的模型名称" value="${escapeAttribute(cfg.cxVisionModel)}" ${independentVision ? '' : 'disabled'}>
+                      <div class="skj-card-desc">三个独立参数必须全部填写，再点击下方保存。切换或隐藏此区域不会清空已保存的独立配置。</div>
+                    </div>
+                  </div>
+                </div>
               </div>
+              <div class="skj-note">连接测试仅检查主解题 API 的文本响应，不验证模型的图片识别能力。</div>
             </div>
           </div>
 
+          <div class="skj-footer">
+            <div id="skj-save-tip" aria-live="polite" class="skj-footer-status">${SKJ_SAVE_TIP_IDLE}</div>
+            <div class="skj-footer-actions" id="skj-footer-ai-actions" hidden>
+              <button type="button" class="skj-btn" id="skj-test-ai-btn">${skjIcon('flash')}测试 API 连接</button>
+              <button type="button" class="skj-btn skj-btn-primary" id="skj-save-api-btn">${skjIcon('save')}保存 API 配置</button>
+            </div>
+          </div>
         </div>
       `;
 
@@ -26046,12 +26511,20 @@
       const tabs = document.querySelectorAll('.skj-tab');
       tabs.forEach((tab) => {
         tab.addEventListener('click', () => {
-          tabs.forEach((t) => t.classList.remove('active'));
+          tabs.forEach((t) => {
+            t.classList.remove('active');
+            t.setAttribute('aria-selected', 'false');
+          });
           document.querySelectorAll('.skj-panel').forEach((p) => p.classList.remove('active'));
 
           tab.classList.add('active');
+          tab.setAttribute('aria-selected', 'true');
+          this.activeTab = tab.dataset.tab;
           const panelId = 'skj-panel-' + tab.dataset.tab;
           document.getElementById(panelId)?.classList.add('active');
+          // API 测试/保存按钮固定在底部命令栏，仅 AI 配置页显示
+          const aiActions = document.getElementById('skj-footer-ai-actions');
+          if (aiActions) aiActions.hidden = tab.dataset.tab !== 'ai';
         });
       });
 
@@ -26171,7 +26644,7 @@
       }
       if (Site.isZhihuishu) this.videoAssist.zhsApplyControlBarRate(1);
 
-      this.showSaveTip('✅ 设置已实时自动保存并生效');
+      this.showSaveTip('设置已实时自动保存并生效');
     }
 
     // 只切换可见性与可编辑性，保留输入中的草稿以及已保存的独立配置。
@@ -26211,7 +26684,7 @@
       }
       setConfig(patch);
 
-      this.showSaveTip('✅ API 配置已成功保存！');
+      this.showSaveTip('API 配置已成功保存');
       if (!silent) {
         AppState.log(`API 配置已保存！模型: ${inputModel}`);
         alert('✅ API 接口配置已成功保存并全局生效！');
@@ -26221,10 +26694,10 @@
     showSaveTip(msg) {
       const tip = document.getElementById('skj-save-tip');
       if (tip) {
-        tip.innerHTML = `<span style="color:#10b981;font-weight:600;">${msg}</span>`;
+        tip.innerHTML = `<span class="skj-tip-success">${skjIcon('done')}${msg}</span>`;
         if (this._tipTimer) clearTimeout(this._tipTimer);
         this._tipTimer = setTimeout(() => {
-          tip.innerHTML = '<span>⚡ 大部分设置修改后实时自动生效并保存</span>';
+          tip.innerHTML = SKJ_SAVE_TIP_IDLE;
         }, 2500);
       }
     }
@@ -26243,13 +26716,16 @@
       const modalStatus = document.getElementById('skj-modal-status-text');
       if (badge) badge.innerText = state.status;
       if (modalStatus) modalStatus.innerText = state.status;
+      const tone = skjStatusTone(state.status);
+      document.getElementById('skj-widget')?.setAttribute('data-skj-state', tone);
+      document.getElementById('skj-status-card')?.setAttribute('data-skj-state', tone);
     }
 
     updateLogs(state) {
       const box = document.getElementById('skj-console-box');
       if (!box) return;
       box.innerHTML = state.logs
-        .map((l) => `<div class="skj-log-item ${l.level}">[${l.time}] ${l.msg}</div>`)
+        .map((l) => `<div class="skj-log-item ${skjEscapeHtml(l.level)}"><span class="skj-log-time">${skjEscapeHtml(l.time)}</span><span>${skjEscapeHtml(l.msg)}</span></div>`)
         .join('');
       box.scrollTop = box.scrollHeight;
     }
